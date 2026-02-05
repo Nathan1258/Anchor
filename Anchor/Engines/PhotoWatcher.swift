@@ -27,10 +27,25 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     private let exportQueue = DispatchQueue(label: "com.anchor.photoExport", qos: .utility)
     
+    private var cancellables = Set<AnyCancellable>()
+    
     override init() {
         super.init()
         restoreState()
+        setupPauseObserver()
     }
+    
+    private func setupPauseObserver() {
+            Timer.publish(every: 60, on: .main, in: .common)
+                .autoconnect()
+                .sink { [weak self] _ in
+                    if !PersistenceManager.shared.isGlobalPaused && self?.status == .paused {
+                        self?.log("▶️ Global pause expired. Resuming...")
+                        self?.startWatching()
+                    }
+                }
+                .store(in: &cancellables)
+        }
     
     private func restoreState() {
         if let source = PersistenceManager.shared.loadBookmark(type: .photoVault) {
@@ -61,6 +76,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     func startWatching() {
+        guard !PersistenceManager.shared.isGlobalPaused else {
+            log("Global Pause Active. Watcher standing by.")
+            self.status = .paused
+            return
+        }
+        
         guard PersistenceManager.shared.isPhotosEnabled else {
             log("🚫 Photo Backup is disabled in Settings.")
             self.status = .disabled
@@ -137,6 +158,10 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     private func checkForChanges() {
+        if PersistenceManager.shared.isGlobalPaused {
+            DispatchQueue.main.async { self.status = .paused }
+            return
+        }
         guard PersistenceManager.shared.isPhotosEnabled else { return }
         
         guard let lastToken = PersistenceManager.shared.loadPhotoToken() else {
@@ -163,7 +188,11 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     private func processDelta(_ changes: PHPersistentChangeFetchResult) {
         exportQueue.async {
             let shouldContinue = DispatchQueue.main.sync {
-                self.status != .waitingForVault && PersistenceManager.shared.isPhotosEnabled
+                if PersistenceManager.shared.isGlobalPaused {
+                    self.status = .paused
+                    return false
+                }
+                return self.status != .waitingForVault && PersistenceManager.shared.isPhotosEnabled
             }
             
             guard shouldContinue else { return }
@@ -172,6 +201,11 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let updatedCount = 0
             
             for change in changes {
+                if PersistenceManager.shared.isGlobalPaused {
+                    DispatchQueue.main.async { self.status = .paused }
+                    break
+                }
+                
                 guard shouldContinue else { return }
                 do{
                     let details = try change.changeDetails(for: .asset)
@@ -306,7 +340,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let resources = PHAssetResource.assetResources(for: asset)
         
         let group = DispatchGroup()
-        var errors: [String] = []
+        let errors: [String] = []
         var savedFilenames: [String] = []
         
         for resource in resources {

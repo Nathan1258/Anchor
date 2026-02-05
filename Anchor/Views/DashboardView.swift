@@ -10,6 +10,8 @@ struct DashboardView: View {
     
     @EnvironmentObject var driveWatcher: DriveWatcher
     @EnvironmentObject var photosWatcher: PhotoWatcher
+    
+    @ObservedObject var persistence = PersistenceManager.shared
     @Environment(\.openWindow) var openWindow
     
     var body: some View {
@@ -35,6 +37,34 @@ struct DashboardView: View {
             }
             .padding()
             .background(Color(nsColor: .windowBackgroundColor))
+            
+            if persistence.isGlobalPaused {
+                HStack {
+                    Image(systemName: "pause.circle.fill")
+                    VStack(alignment: .leading) {
+                        Text("Global Pause Active")
+                            .fontWeight(.bold)
+                        if let date = persistence.pausedUntil {
+                            Text("Resuming \(date, style: .relative)")
+                                .font(.caption)
+                        } else {
+                            Text("Paused indefinitely")
+                                .font(.caption)
+                        }
+                    }
+                    Spacer()
+                    Button("Resume Now") {
+                        persistence.pausedUntil = nil
+                        driveWatcher.startWatching()
+                        photosWatcher.startWatching()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding()
+                .background(Color.orange.opacity(0.15))
+                .overlay(Rectangle().frame(height: 1).foregroundColor(.orange.opacity(0.3)), alignment: .bottom)
+            }
             
             Divider()
             

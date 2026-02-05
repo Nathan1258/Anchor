@@ -29,9 +29,24 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     private var vaultMonitor: VaultMonitor?
     
+    private var cancellables = Set<AnyCancellable>()
+    
     override init() {
         super.init()
         restoreState()
+        setupPauseObserver()
+    }
+    
+    private func setupPauseObserver() {
+        Timer.publish(every: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                if !PersistenceManager.shared.isGlobalPaused && self?.status == .paused {
+                    self?.log("▶️ Global pause expired. Resuming...")
+                    self?.startWatching()
+                }
+            }
+            .store(in: &cancellables)
     }
     
     private func restoreState() {
@@ -62,6 +77,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }()
     
     func presentedSubitemDidAppear(at url: URL) {
+        if PersistenceManager.shared.isGlobalPaused {
+            DispatchQueue.main.async { self.status = .paused }
+            return
+        }
         guard PersistenceManager.shared.isDriveEnabled else { return }
         
         DispatchQueue.main.async { self.status = .newItem }
@@ -70,6 +89,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     func presentedSubitemDidChange(at url: URL) {
+        if PersistenceManager.shared.isGlobalPaused {
+            DispatchQueue.main.async { self.status = .paused }
+            return
+        }
         guard PersistenceManager.shared.isDriveEnabled else { return }
         
         DispatchQueue.main.async { self.status = .changeDetected }
@@ -86,10 +109,11 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func handleIncomingFile(at url: URL) {
-        guard PersistenceManager.shared.isDriveEnabled else { return }
+        guard !PersistenceManager.shared.isGlobalPaused,
+              PersistenceManager.shared.isDriveEnabled else { return }
         
         if !FileManager.default.fileExists(atPath: url.path) {
-            if PersistenceManager.shared.mirrorDeletions {
+            if PersistenceManager.shared.backupMode == .mirror {
                 guard let relativePath = getRelativePath(for: url) else { return }
                 deleteFromVault(relativePath: relativePath)
             } else {
@@ -129,10 +153,27 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
         
     func selectSourceFolder() {
-        requestFolderAccess(prompt: "Select iCloud Drive") { url in
-            self.sourceURL = url
-            PersistenceManager.shared.saveBookmark(for: url, type: .driveSource)
-            self.log("Source set to: \(url.path)")
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Grant Access"
+        panel.message = "Anchor needs permission to watch your iCloud Drive."
+        
+        if let iCloudURL = FileManager.default.url(forUbiquityContainerIdentifier: nil)?.appendingPathComponent("Documents") {
+            panel.directoryURL = iCloudURL
+        } else {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let standardPath = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+            panel.directoryURL = standardPath
+        }
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                self.sourceURL = url
+                PersistenceManager.shared.saveBookmark(for: url, type: .driveSource)
+                self.log("Source set to: \(url.path)")
+            }
         }
     }
     
@@ -147,6 +188,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     func startWatching() {
+        guard !PersistenceManager.shared.isGlobalPaused else {
+            log("Global Pause Active. Watcher standing by.")
+            self.status = .paused
+            return
+        }
+        
         guard PersistenceManager.shared.isDriveEnabled else {
             log("🚫 Drive Sync is disabled in Settings.")
             self.status = .disabled
@@ -243,6 +290,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     
     func performInitialScan() {
+        if PersistenceManager.shared.isGlobalPaused { self.status = .paused; return }
         guard PersistenceManager.shared.isDriveEnabled else { return }
         guard let source = sourceURL else { return }
         
@@ -256,6 +304,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
+            if PersistenceManager.shared.isGlobalPaused {
+                DispatchQueue.main.async { self.status = .paused }
+                return
+            }
             guard PersistenceManager.shared.isDriveEnabled else { return }
             
             let fileManager = FileManager.default
@@ -271,8 +323,11 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             var skipped = 0
             
             for case let fileURL as URL in enumerator {
+                if PersistenceManager.shared.isGlobalPaused {
+                    DispatchQueue.main.async { self.status = .paused }
+                    break
+                }
                 if !PersistenceManager.shared.isDriveEnabled { break }
-                
                 if (processed + skipped) % 50 == 0 {
                     DispatchQueue.main.async {
                         self.sessionScannedCount = processed + skipped

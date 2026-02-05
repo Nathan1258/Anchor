@@ -9,6 +9,7 @@ import Foundation
 enum PhotosStatus: Equatable {
     case waiting
     case disabled
+    case paused
     case waitingForVault
     case waitingForStatus
     case accessDenied
@@ -24,6 +25,7 @@ enum PhotosStatus: Equatable {
         switch self {
         case .waiting: return "Waiting to start..."
         case .disabled: return "Disabled"
+        case .paused: return "Paused"
         case .accessDenied: return "Access Denied"
         case .waitingForVault: return "Waiting for Vault..."
         case .waitingForStatus: return "Waiting for Photos Library to update..."

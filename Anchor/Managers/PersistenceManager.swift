@@ -17,7 +17,10 @@ class PersistenceManager: ObservableObject {
     private let kVaultBookmark = "anchor_vault_bookmark"
     private let kPhotoVaultBookmark = "anchor_photo_vault_bookmark"
     private let kPhotoChangeToken = "anchor_photo_change_token"
-    private let kMirrorDeletions = "anchor_mirror_deletions"
+    
+    private let kBackupMode = "anchor_backup_mode"
+    private let kSnapshotFrequency = "anchor_snapshot_freq"
+    private let kAutoPrune = "anchor_auto_prune"
     
     private let kIsDriveEnabled = "anchor_is_drive_enabled"
     private let kIsPhotosEnabled = "anchor_is_photos_enabled"
@@ -25,11 +28,41 @@ class PersistenceManager: ObservableObject {
     private let kNotifyBackupComplete = "anchor_notify_backup_complete"
     private let kNotifyVaultIssue = "anchor_notify_vault_issue"
     
-    var mirrorDeletions: Bool {
-        get { defaults.bool(forKey: kMirrorDeletions) }
+    private let kIgnoredExtensions = "anchor_ignore_ext"
+    private let kIgnoredFolders = "anchor_ignore_folders"
+    
+    private let kPausedUntil = "anchor_paused_until"
+    
+    var backupMode: BackupMode {
+        get {
+            let raw = defaults.integer(forKey: kBackupMode)
+            return BackupMode(rawValue: raw) ?? .basic
+        }
         set {
             objectWillChange.send()
-            defaults.set(newValue, forKey: kMirrorDeletions)
+            defaults.set(newValue.rawValue, forKey: kBackupMode)
+        }
+    }
+    
+    var snapshotFrequency: Int {
+        get {
+            let val = defaults.integer(forKey: kSnapshotFrequency)
+            return val == 0 ? 60 : val
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kSnapshotFrequency)
+        }
+    }
+    
+    var autoPrune: Bool {
+        get {
+            if defaults.object(forKey: kAutoPrune) == nil { return true }
+            return defaults.bool(forKey: kAutoPrune)
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kAutoPrune)
         }
     }
     
@@ -42,6 +75,32 @@ class PersistenceManager: ObservableObject {
             objectWillChange.send()
             defaults.set(newValue, forKey: kIsDriveEnabled)
         }
+    }
+    
+    var pausedUntil: Date? {
+        get { defaults.object(forKey: kPausedUntil) as? Date }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kPausedUntil)
+        }
+    }
+    
+    var isGlobalPaused: Bool {
+        guard let date = pausedUntil else { return false }
+        if Date() < date { return true }
+        
+        pausedUntil = nil
+        return false
+    }
+    
+    var ignoredExtensions: [String] {
+        get { defaults.stringArray(forKey: kIgnoredExtensions) ?? [] }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kIgnoredExtensions) }
+    }
+    
+    var ignoredFolders: [String] {
+        get { defaults.stringArray(forKey: kIgnoredFolders) ?? [] }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kIgnoredFolders) }
     }
     
     var notifyBackupComplete: Bool {

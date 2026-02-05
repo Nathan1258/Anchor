@@ -9,6 +9,7 @@ import Foundation
 enum DriveStatus: Equatable {
     case idle
     case disabled
+    case paused
     case waitingForVault
     case active
     case scanning
@@ -23,6 +24,7 @@ enum DriveStatus: Equatable {
         switch self {
         case .idle: return "Idle"
         case .disabled: return "Disabled"
+        case .paused: return "Paused"
         case .waitingForVault: return "Waiting for Vault..."
         case .active: return "Watcher Active"
         case .scanning: return "Performing Smart Scan..."

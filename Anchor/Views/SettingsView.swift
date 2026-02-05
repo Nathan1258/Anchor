@@ -11,177 +11,141 @@ struct SettingsView: View {
     @EnvironmentObject var driveWatcher: DriveWatcher
     @EnvironmentObject var photoWatcher: PhotoWatcher
     
+    @ObservedObject var persistence = PersistenceManager.shared
     @ObservedObject var settings = SettingsManager.shared
     
-    @State private var mirrorDeletions = PersistenceManager.shared.mirrorDeletions
-    
-    @Environment(\.dismiss) var dismiss
-    
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 16) {
-                Toggle(isOn: $settings.launchAtLogin) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Launch at Login")
-                            .font(.body)
-                        Text("Automatically start Anchor when you log in")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(SwitchToggleStyle())
-            }
-            .padding()
-            
-            Toggle(isOn: $mirrorDeletions) {
-                VStack(alignment: .leading) {
-                    Text("Mirror Deletions")
-                    Text("If enabled, deleting a file in iCloud will delete it from the Vault.")
+        TabView {
+            // MARK: - General Tab
+            Form {
+                Section {
+                    Toggle("Launch at Login", isOn: $settings.launchAtLogin)
+                        .toggleStyle(.switch)
+                    Text("Automatically start Anchor when you log in.")
                         .font(.caption)
-                        .foregroundColor(mirrorDeletions ? .red : .secondary)
+                        .foregroundColor(.secondary)
                 }
             }
-            .onChange(of: mirrorDeletions) { PersistenceManager.shared.mirrorDeletions = mirrorDeletions }
-            .padding()
+            .tabItem { Label("General", systemImage: "gear")}
+            .tag(0)
             
-            Divider()
-            
-            // MARK: - Anchor Safety Net Controls
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Safety Net Configuration")
-                    .font(.headline)
+            // MARK: - Drive Tab
+            Form {
+                Section {
+                    Toggle("Enable Drive Sync", isOn: $persistence.isDriveEnabled)
+                        .toggleStyle(.switch)
+                }
                 
-                // Source Selector
-                HStack {
-                    Image(systemName: "icloud.and.arrow.down")
-                        .frame(width: 20)
-                    VStack(alignment: .leading) {
-                        Text("Source (iCloud)")
+                Group {
+                    Section(header: Text("Configuration")) {
+                        PathPickerRow(
+                            label: "Source Folder",
+                            path: driveWatcher.sourceURL,
+                            icon: "icloud",
+                            action: driveWatcher.selectSourceFolder
+                        )
+                        
+                        PathPickerRow(
+                            label: "Vault Folder",
+                            path: driveWatcher.vaultURL,
+                            icon: "externaldrive",
+                            action: driveWatcher.selectVaultFolder
+                        )
+                    }
+                    
+                    Section(header: Text("Behavior")) {
+                        Toggle("Mirror Deletions", isOn: $persistence.mirrorDeletions)
+                        
+                        Text("If enabled, deleting a file in iCloud will delete it from the Vault immediately.")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text(driveWatcher.sourceURL?.lastPathComponent ?? "Select Folder...")
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                    Button("Select") {
-                        driveWatcher.selectSourceFolder()
                     }
                 }
+                .disabled(!persistence.isDriveEnabled)
+            }
+            .tabItem { Label("Drive", systemImage: "icloud.and.arrow.down")}
+            .tag(1)
+            
+            // MARK: - Photos Tab
+            Form {
+                Section {
+                    Toggle("Enable Photo Backup", isOn: $persistence.isPhotosEnabled)
+                        .toggleStyle(.switch)
+                }
                 
-                // Vault Selector
-                HStack {
-                    Image(systemName: "externaldrive")
-                        .frame(width: 20)
-                    VStack(alignment: .leading) {
-                        Text("Vault (Local)")
+                Group {
+                    Section(header: Text("Backup Location")) {
+                        PathPickerRow(
+                            label: "Photo Vault",
+                            path: photoWatcher.vaultURL,
+                            icon: "photo.on.rectangle",
+                            action: photoWatcher.selectVaultFolder
+                        )
+                        Text("Anchor will organize photos by Year/Month automatically.")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text(driveWatcher.vaultURL?.lastPathComponent ?? "Select Folder...")
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                    Button("Select") {
-                        driveWatcher.selectVaultFolder()
                     }
                 }
-                
-                Divider()
-                
-                // Action Button
-                Button(action: {
-                    driveWatcher.startWatching()
-                }) {
-                    HStack {
-                        Circle()
-                            .fill(driveWatcher.isRunning ? Color.green : Color.gray)
-                            .frame(width: 8, height: 8)
-                        Text(driveWatcher.isRunning ? "Watching for changes..." : "Start Watcher")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .disabled(driveWatcher.sourceURL == nil || driveWatcher.vaultURL == nil)
-                .controlSize(.large)
-                
-                // Live Logs (For Testing)
-                GroupBox(label: Text("Live Logs").font(.caption)) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(driveWatcher.logs) { entry in
-                                HStack(alignment: .top) {
-                                    Text(entry.timestamp, style: .time)
-                                        .font(.caption2)
-                                        .foregroundColor(.gray)
-                                    Text(entry.message)
-                                        .font(.system(size: 10, design: .monospaced))
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            if driveWatcher.logs.isEmpty {
-                                Text("Ready to start.")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        .padding(4)
-                    }
-                }
-                .frame(height: 80)
+                .disabled(!persistence.isPhotosEnabled)
             }
-            .padding()
+            .tabItem { Label("Photos", systemImage: "photo")}
+            .tag(2)
             
-            Divider()
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Photos Vacuum")
-                    .font(.headline)
-
-                HStack {
-                    Image(systemName: "photo.on.rectangle")
-                        .frame(width: 20)
-                    VStack(alignment: .leading) {
-                        Text("Photo Vault")
-                            .font(.caption).foregroundColor(.secondary)
-                        Text(photoWatcher.vaultURL?.path ?? "Select Folder...")
-                            .font(.system(size: 11))
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                    Button("Select") { photoWatcher.selectVaultFolder() }
+            // MARK: - Notifications Tab
+            Form {
+                Section(header: Text("Triggers")) {
+                    Toggle("Notify when Backup Complete", isOn: $persistence.notifyBackupComplete)
+                    Toggle("Notify on Vault Issues", isOn: $persistence.notifyVaultIssue)
                 }
-                
-                Button(action: { photoWatcher.startWatching() }) {
-                    HStack {
-                        Circle().fill(photoWatcher.isRunning ? Color.green : Color.gray).frame(width: 8, height: 8)
-                        Text(photoWatcher.isRunning ? "Scanning & Watching..." : "Start Vacuum")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                
-                // Logs for Photos
-                GroupBox(label: Text("Photo Logs").font(.caption)) {
-                    ScrollView {
-                        VStack(alignment: .leading) {
-                            ForEach(photoWatcher.logs, id: \.self) { log in
-                                Text(log).font(.system(size: 10, design: .monospaced))
-                            }
-                        }
-                    }
-                }
-                .frame(height: 80)
             }
-            .padding()
-            
-            Spacer()
+            .tabItem { Label("Notifications", systemImage: "bell.badge") }
+            .tag(3)
         }
-        .frame(width: 320, height: 600)
+        .formStyle(.grouped)
+        .frame(width: 600, height: 400)
+        .onChange(of: persistence.notifyBackupComplete){
+            if persistence.notifyBackupComplete{
+                NotificationManager.shared.requestPermissions()
+            }
+        }
+        .onChange(of: persistence.notifyVaultIssue){
+            if persistence.notifyVaultIssue{
+                NotificationManager.shared.requestPermissions()
+            }
+        }
     }
 }
 
-#Preview {
-    SettingsView()
+struct PathPickerRow: View {
+    let label: String
+    let path: URL?
+    let icon: String
+    let action: () -> Void
+    
+    var body: some View {
+        HStack {
+            Image(systemName: icon)
+                .frame(width: 20)
+                .foregroundColor(.secondary)
+            
+            VStack(alignment: .leading) {
+                Text(label)
+                    .fontWeight(.medium)
+                if let p = path {
+                    Text(p.path)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .truncationMode(.middle)
+                        .lineLimit(1)
+                } else {
+                    Text("Not Set")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+            Spacer()
+            Button("Select...", action: action)
+        }
+        .padding(.vertical, 4)
+    }
 }

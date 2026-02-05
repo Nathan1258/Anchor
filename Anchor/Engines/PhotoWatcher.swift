@@ -10,23 +10,20 @@ import SwiftUI
 import Combine
 
 class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
-    
-    // MARK: - Configuration
     @Published var vaultURL: URL?
     @Published var isRunning = false
     
-    // MARK: - UI / Dashboard State
-    @Published var statusMessage = "Waiting to start..."
+    @Published var status: PhotosStatus = .waiting
     @Published var isProcessing = false
     @Published var lastSyncTime: Date? = nil
     
-    // MARK: - Metrics
     @Published var totalLibraryCount: Int = 0
     @Published var sessionSavedCount: Int = 0
     @Published var lastPhotoProcessed: String = "-"
     
-    // MARK: - Debug
     @Published var logs: [String] = []
+    
+    private var vaultMonitor: VaultMonitor?
     
     private let exportQueue = DispatchQueue(label: "com.anchor.photoExport", qos: .utility)
     
@@ -64,41 +61,92 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     func startWatching() {
-        guard vaultURL != nil else {
+        guard PersistenceManager.shared.isPhotosEnabled else {
+            log("🚫 Photo Backup is disabled in Settings.")
+            self.status = .disabled
+            return
+        }
+        
+        guard let vault = vaultURL else {
             log("⚠️ Select a Vault folder first.")
             return
         }
+        
+        setupVaultMonitor(for: vault)
         
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
             DispatchQueue.main.async {
                 if status == .authorized || status == .limited {
                     self.registerObserver()
-                    self.checkForChanges()
+                    if self.status != .waitingForVault {
+                        self.checkForChanges()
+                    }
                 } else {
                     self.log("❌ Photos Access Denied.")
-                    self.statusMessage = "Access Denied"
+                    self.status = .accessDenied
                 }
             }
         }
     }
     
+    private func setupVaultMonitor(for url: URL) {
+        vaultMonitor?.stop()
+        vaultMonitor = VaultMonitor(url: url)
+        
+        vaultMonitor?.onDisconnect = { [weak self] in
+            self?.log("⚠️ Photo Vault disconnected! Pausing export.")
+            
+            self?.vaultURL?.stopAccessingSecurityScopedResource()
+            
+            self?.status = .waitingForVault
+            
+            NotificationManager.shared.send(
+                title: "Photo Backup Paused",
+                body: "The Photo Vault drive was disconnected.",
+                type: .vaultIssue
+            )
+        }
+        
+        vaultMonitor?.onReconnect = { [weak self] in
+            self?.log("✅ Photo Vault reconnected. Resuming...")
+            guard let newVault = PersistenceManager.shared.loadBookmark(type: .photoVault) else {
+                self?.log("❌ Failed to resolve bookmark.")
+                return
+            }
+            
+            if newVault.startAccessingSecurityScopedResource() {
+                self?.vaultURL = newVault
+                self?.status = .monitoring
+                self?.log("✅ Resumed.")
+                self?.checkForChanges()
+            } else {
+                self?.log("❌ Permission denied on reconnect.")
+                self?.status = .accessDenied
+                
+            }
+        }
+        
+        vaultMonitor?.start()
+    }
+    
     private func registerObserver() {
         PHPhotoLibrary.shared().register(self)
         self.isRunning = true
-        self.statusMessage = "Monitoring Library"
+        self.status = .monitoring
         self.log("👀 Watching Photo Library for changes...")
     }
     
     private func checkForChanges() {
+        guard PersistenceManager.shared.isPhotosEnabled else { return }
+        
         guard let lastToken = PersistenceManager.shared.loadPhotoToken() else {
             performFullScan()
             return
         }
         
-        // UI
         DispatchQueue.main.async {
             self.isProcessing = true
-            self.statusMessage = "Checking for new photos..."
+            self.status = .checkingForChanges
         }
         
         log("🔎 Checking for new photos since last run...")
@@ -112,41 +160,39 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
     }
     
-    // 1. Add ability to sync fully or only sync new changes (or potentially sync from a certain date onwards)
-    // 2. Add toggle to sync changes or not
     private func processDelta(_ changes: PHPersistentChangeFetchResult) {
         exportQueue.async {
+            let shouldContinue = DispatchQueue.main.sync {
+                self.status != .waitingForVault && PersistenceManager.shared.isPhotosEnabled
+            }
+            
+            guard shouldContinue else { return }
+            
             var addedCount = 0
-            var updatedCount = 0
+            let updatedCount = 0
             
             for change in changes {
+                guard shouldContinue else { return }
                 do{
                     let details = try change.changeDetails(for: .asset)
                     let inserted = details.insertedLocalIdentifiers
                     if !inserted.isEmpty {
                         let assets = PHAsset.fetchAssets(withLocalIdentifiers: Array(inserted), options: nil)
-                        assets.enumerateObjects { asset, _, _ in
+                        assets.enumerateObjects { asset, _, stop in
+                            if !PersistenceManager.shared.isPhotosEnabled {
+                                stop.pointee = true
+                                return
+                            }
+                            
                             autoreleasepool {
                                 self.exportAsset(asset, forceOverwrite: false)
                                 addedCount += 1
                             }
                         }
                     }
-                    
-                    // 2. Handle EDITED items (Updates)
-                    //                let updated = details.updatedLocalIdentifiers
-                    //                if !updated.isEmpty {
-                    //                    let assets = PHAsset.fetchAssets(withLocalIdentifiers: Array(updated), options: nil)
-                    //                    assets.enumerateObjects { asset, _, _ in
-                    //                        autoreleasepool {
-                    //                            // Force overwrite because the photo has changed
-                    //                            self.exportAsset(asset, forceOverwrite: true)
-                    //                            updatedCount += 1
-                    //                        }
-                    //                    }
-                    //                }
-                    
-                    PersistenceManager.shared.savePhotoToken(change.changeToken)
+                    if PersistenceManager.shared.isPhotosEnabled {
+                        PersistenceManager.shared.savePhotoToken(change.changeToken)
+                    }
                     
                 }catch{
                     self.logs.append("⚠️ Error processing change: \(error)")
@@ -156,25 +202,39 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             
             DispatchQueue.main.async {
                 self.isProcessing = false
-                if addedCount > 0 || updatedCount > 0 {
-                    self.statusMessage = "Synced \(addedCount) new items"
-                    self.log("⚡️ Delta Sync: \(addedCount) added, \(updatedCount) updated.")
+                if PersistenceManager.shared.isPhotosEnabled {
+                    if addedCount > 0 || updatedCount > 0 {
+                        self.status = .synced(count: addedCount)
+                        self.log("⚡️ Delta Sync: \(addedCount) added, \(updatedCount) updated.")
+                        NotificationManager.shared.send(
+                            title: "Photos Synced",
+                            body: "Saved \(addedCount) new photos to Vault.",
+                            type: .backupComplete
+                        )
+                    } else {
+                        self.status = .upToDate
+                        self.log("✅ Smart Scan: No relevant changes found.")
+                    }
                 } else {
-                    self.statusMessage = "Up to date"
-                    self.log("✅ Smart Scan: No relevant changes found.")
+                    self.status = .disabled
                 }
             }
         }
     }
     
     private func performFullScan() {
+        guard self.status != .waitingForVault,
+              PersistenceManager.shared.isPhotosEnabled else { return }
+        
         DispatchQueue.main.async {
-            self.statusMessage = "Scanning entire library..."
+            self.status = .scanning
             self.isProcessing = true
         }
         log("🐢 First Run: Scanning entire library...")
         
         exportQueue.async {
+            guard PersistenceManager.shared.isPhotosEnabled else { return }
+            
             let options = PHFetchOptions()
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
             let allAssets = PHAsset.fetchAssets(with: options)
@@ -185,9 +245,18 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             }
             
             allAssets.enumerateObjects { (asset, index, stop) in
+                let shouldStop = DispatchQueue.main.sync {
+                    self.status == .waitingForVault || !PersistenceManager.shared.isPhotosEnabled
+                }
+                
+                if shouldStop {
+                    stop.pointee = true
+                    return
+                }
+                
                 if index % 10 == 0 {
                     DispatchQueue.main.async {
-                        self.statusMessage = "Processing \(index)/\(allAssets.count)..."
+                        self.status = .processing(current: index, total: allAssets.count)
                     }
                 }
                 self.exportAsset(asset)
@@ -198,13 +267,21 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             
             DispatchQueue.main.async {
                 self.isProcessing = false
-                self.statusMessage = "Full Backup Complete"
+                self.status = .backupComplete
                 self.log("✅ Full Scan Complete. Token Saved.")
+                
+                NotificationManager.shared.send(
+                    title: "Photo Backup Complete",
+                    body: "Your entire library has been scanned and backed up.",
+                    type: .backupComplete
+                )
             }
         }
     }
     
     func photoLibraryDidChange(_ changeInstance: PHChange) {
+        guard PersistenceManager.shared.isPhotosEnabled else { return }
+        
         DispatchQueue.main.async {
             self.checkForChanges()
         }
@@ -213,9 +290,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     private func exportAsset(_ asset: PHAsset, forceOverwrite: Bool = false) {
         guard let vault = vaultURL else { return }
         
-        DispatchQueue.main.async {
-            self.lastPhotoProcessed = "Item..."
-        }
+        DispatchQueue.main.async { self.lastPhotoProcessed = "Processing..." }
         
         let date = asset.creationDate ?? Date()
         let calendar = Calendar.current
@@ -229,33 +304,60 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         } catch { return }
         
         let resources = PHAssetResource.assetResources(for: asset)
-        guard let mainResource = resources.first(where: { $0.type == .photo || $0.type == .video }) else { return }
         
-        let filename = mainResource.originalFilename
-        let destinationURL = folderURL.appendingPathComponent(filename)
+        let group = DispatchGroup()
+        var errors: [String] = []
+        var savedFilenames: [String] = []
         
-        DispatchQueue.main.async { self.lastPhotoProcessed = filename }
-        
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            if forceOverwrite {
-                try? FileManager.default.removeItem(at: destinationURL)
-            } else {
-                return
+        for resource in resources {
+            group.enter()
+            
+            let filename = resource.originalFilename
+            let destinationURL = folderURL.appendingPathComponent(filename)
+            
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                if forceOverwrite {
+                    try? FileManager.default.removeItem(at: destinationURL)
+                } else {
+                    group.leave()
+                    continue
+                }
+            }
+            
+            let options = PHAssetResourceRequestOptions()
+            options.isNetworkAccessAllowed = true
+            
+            PHAssetResourceManager.default().writeData(for: resource, toFile: destinationURL, options: options) { error in
+                if let error {
+                    self.log("⚠️ Failed: \(filename) - \(error.localizedDescription)")
+                    
+                    if (error as NSError).domain == NSCocoaErrorDomain && (error as NSError).code == 4 {
+                        NotificationManager.shared.send(
+                            title: "Vault Disconnected",
+                            body: "Could not write to Photo Vault. Please check your drive connection.",
+                            type: .vaultIssue
+                        )
+                    }
+                } else {
+                    savedFilenames.append(filename)
+                }
+                group.leave()
             }
         }
         
-        let options = PHAssetResourceRequestOptions()
-        options.isNetworkAccessAllowed = true
-        
-        PHAssetResourceManager.default().writeData(for: mainResource, toFile: destinationURL, options: options) { error in
-            if let e = error {
-                self.log("⚠️ Failed: \(filename) - \(e.localizedDescription)")
-            } else {
-                DispatchQueue.main.async {
-                    self.sessionSavedCount += 1
-                    self.lastSyncTime = Date()
+        group.notify(queue: .main) {
+            if !savedFilenames.isEmpty {
+                self.sessionSavedCount += 1
+                self.lastSyncTime = Date()
+                
+                if let primeFile = savedFilenames.first {
+                    self.lastPhotoProcessed = primeFile
+                    self.log(forceOverwrite ? "♻️ Updated: \(primeFile)" : "✅ Saved: \(primeFile) (+ components)")
                 }
-                self.log(forceOverwrite ? "♻️ Updated: \(filename)" : "✅ Saved: \(filename)")
+            }
+            
+            if !errors.isEmpty {
+                self.log("⚠️ Issues saving asset components: \(errors.joined(separator: ", "))")
             }
         }
     }

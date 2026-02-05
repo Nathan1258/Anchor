@@ -11,25 +11,23 @@ import Cocoa
 
 class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
-    // MARK: - Configuration
     @Published var sourceURL: URL?
     @Published var vaultURL: URL?
     @Published var isRunning = false
     
-    // MARK: - UI / Dashboard State
-    @Published var statusMessage: String = "Idle"
+    @Published var status: DriveStatus = .idle
     @Published var isScanning: Bool = false
     @Published var lastSyncTime: Date? = nil
     
-    // MARK: - Metrics (Session)
     @Published var sessionScannedCount: Int = 0
     @Published var sessionVaultedCount: Int = 0
     @Published var lastFileProcessed: String = "-"
     
-    // MARK: - Debug
     @Published var logs: [LogEntry] = []
     
     private let ledger = SQLiteLedger()
+    
+    private var vaultMonitor: VaultMonitor?
     
     override init() {
         super.init()
@@ -55,7 +53,6 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         }
     }
     
-    // MARK: - NSFilePresenter
     var presentedItemURL: URL? { return sourceURL }
     
     lazy var presentedItemOperationQueue: OperationQueue = {
@@ -65,14 +62,17 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }()
     
     func presentedSubitemDidAppear(at url: URL) {
-        // UI Update
-        DispatchQueue.main.async { self.statusMessage = "New item detected..." }
+        guard PersistenceManager.shared.isDriveEnabled else { return }
+        
+        DispatchQueue.main.async { self.status = .newItem }
         log("✨ New Item Detected: \(url.lastPathComponent)")
         handleIncomingFile(at: url)
     }
     
     func presentedSubitemDidChange(at url: URL) {
-        DispatchQueue.main.async { self.statusMessage = "Change detected..." }
+        guard PersistenceManager.shared.isDriveEnabled else { return }
+        
+        DispatchQueue.main.async { self.status = .changeDetected }
         log("Hz Change Detected: \(url.lastPathComponent)")
         handleIncomingFile(at: url)
     }
@@ -86,9 +86,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func handleIncomingFile(at url: URL) {
+        guard PersistenceManager.shared.isDriveEnabled else { return }
+        
         if !FileManager.default.fileExists(atPath: url.path) {
             if PersistenceManager.shared.mirrorDeletions {
-                // MIRROR MODE: Delete from Vault
                 guard let relativePath = getRelativePath(for: url) else { return }
                 deleteFromVault(relativePath: relativePath)
             } else {
@@ -104,7 +105,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         if ledger.shouldProcess(relativePath: metadata.relativePath, currentGenID: metadata.genID) {
             processFile(at: url, genID: metadata.genID, relativePath: metadata.relativePath)
         } else {
-            DispatchQueue.main.async { self.statusMessage = "Monitoring..." }
+            DispatchQueue.main.async { self.status = .monitoring }
         }
     }
     
@@ -119,7 +120,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 log("🗑️ Synced Deletion: \(relativePath)")
                 
                 DispatchQueue.main.async {
-                    self.statusMessage = "Deleted \(destURL.lastPathComponent)"
+                    self.status = .deleted(filename: destURL.lastPathComponent)
                 }
             }
         } catch {
@@ -146,7 +147,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     func startWatching() {
-        guard let source = sourceURL, let _ = vaultURL else {
+        guard PersistenceManager.shared.isDriveEnabled else {
+            log("🚫 Drive Sync is disabled in Settings.")
+            self.status = .disabled
+            return
+        }
+        
+        guard let source = sourceURL, let vault = vaultURL else {
             log("❌ Error: Select both folders first.")
             return
         }
@@ -156,31 +163,100 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             return
         }
         
+        setupVaultMonitor(for: vault)
+        
+        if !source.startAccessingSecurityScopedResource() {
+            log("❌ Failed to access source folder. Check Permissions.")
+            return
+        }
+        
         NSFileCoordinator.addFilePresenter(self)
         self.isRunning = true
-        self.statusMessage = "Watcher Active"
+        self.status = .active
         log("👀 Watcher Registered via NSFilePresenter")
         
-        // Fire initial scan
         performInitialScan()
     }
     
-    // MARK: - Logic
+    private func setupVaultMonitor(for url: URL) {
+        vaultMonitor?.stop()
+        
+        vaultMonitor = VaultMonitor(url: url)
+        
+        vaultMonitor?.onDisconnect = { [weak self] in
+            self?.suspendForDisconnection()
+        }
+        
+        vaultMonitor?.onReconnect = { [weak self] in
+            self?.resumeFromDisconnection()
+        }
+        
+        vaultMonitor?.start()
+    }
+    
+    private func suspendForDisconnection() {
+        guard isRunning else { return }
+        
+        log("⚠️ Vault disconnected! Pausing watcher...")
+        
+        NSFileCoordinator.removeFilePresenter(self)
+        
+        self.vaultURL?.stopAccessingSecurityScopedResource()
+        self.sourceURL?.stopAccessingSecurityScopedResource()
+        
+        self.status = .waitingForVault
+        
+        NotificationManager.shared.send(
+            title: "Drive Paused",
+            body: "The Vault drive was disconnected. Anchor will resume when it returns.",
+            type: .vaultIssue
+        )
+    }
+    
+    private func resumeFromDisconnection() {
+        guard status == .waitingForVault else { return }
+        
+        log("✅ Vault reconnected. Resuming...")
+        
+        guard let newSource = PersistenceManager.shared.loadBookmark(type: .driveSource),
+              let newVault = PersistenceManager.shared.loadBookmark(type: .driveVault) else {
+            log("❌ Critical: Could not restore bookmarks after reconnect.")
+            self.status = .disabled
+            return
+        }
+        
+        guard newSource.startAccessingSecurityScopedResource(),
+              newVault.startAccessingSecurityScopedResource() else {
+            log("❌ Critical: Permission denied on reconnected drive.")
+            self.status = .disabled
+            return
+        }
+        
+        self.sourceURL = newSource
+        self.vaultURL = newVault
+        
+        NSFileCoordinator.addFilePresenter(self)
+        self.status = .monitoring
+        
+        performInitialScan()
+    }
+    
     
     func performInitialScan() {
+        guard PersistenceManager.shared.isDriveEnabled else { return }
         guard let source = sourceURL else { return }
         
-        // UI Updates
         DispatchQueue.main.async {
             self.isScanning = true
-            self.statusMessage = "Performing Smart Scan..."
+            self.status = .scanning
             self.sessionScannedCount = 0
         }
         log("🔎 Starting Smart Scan (Checking Generation IDs)...")
         
-        // Background Work
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            
+            guard PersistenceManager.shared.isDriveEnabled else { return }
             
             let fileManager = FileManager.default
             let keys: [URLResourceKey] = [
@@ -195,8 +271,8 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             var skipped = 0
             
             for case let fileURL as URL in enumerator {
+                if !PersistenceManager.shared.isDriveEnabled { break }
                 
-                // Update UI periodically during loop
                 if (processed + skipped) % 50 == 0 {
                     DispatchQueue.main.async {
                         self.sessionScannedCount = processed + skipped
@@ -223,8 +299,21 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             DispatchQueue.main.async {
                 self.isScanning = false
                 self.sessionScannedCount = processed + skipped
-                self.statusMessage = "Monitoring Active"
-                self.log("✅ Smart Scan Complete. Processed: \(processed), Skipped: \(skipped)")
+                
+                if PersistenceManager.shared.isDriveEnabled {
+                    self.status = .monitoring
+                    self.log("✅ Smart Scan Complete. Processed: \(processed), Skipped: \(skipped)")
+                    if processed > 0 {
+                        NotificationManager.shared.send(
+                            title: "Drive Scan Complete",
+                            body: "Processed \(processed) files. Anchor is now monitoring for changes.",
+                            type: .backupComplete
+                        )
+                    }
+                } else {
+                    self.status = .disabled
+                    self.log("🚫 Scan aborted (Disabled).")
+                }
             }
         }
     }
@@ -264,7 +353,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             if status == .current {
                 copyToVault(fileURL: url, relativePath: relativePath, genID: genID)
             } else if status == .notDownloaded {
-                DispatchQueue.main.async { self.statusMessage = "Downloading \(url.lastPathComponent)..." }
+                DispatchQueue.main.async { self.status = .downloading(filename: url.lastPathComponent) }
                 log("☁️ Downloading update: \(url.lastPathComponent)")
                 try FileManager.default.startDownloadingUbiquitousItem(at: url)
             } else {
@@ -292,16 +381,23 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             
             ledger.markAsProcessed(relativePath: relativePath, genID: genID)
             
-            // Success UI Update
             DispatchQueue.main.async {
                 self.sessionVaultedCount += 1
                 self.lastSyncTime = Date()
-                self.statusMessage = "Vaulted \(fileURL.lastPathComponent)"
+                self.status = .vaulted(filename: fileURL.lastPathComponent)
             }
             log("✅ Vaulted: \(fileURL.lastPathComponent)")
             
         } catch {
             log("⚠️ Copy Failed: \(error.localizedDescription)")
+            
+            if (error as NSError).domain == NSCocoaErrorDomain {
+                NotificationManager.shared.send(
+                    title: "Drive Vault Error",
+                    body: "Failed to copy file. Check if your Vault drive is connected.",
+                    type: .vaultIssue
+                )
+            }
         }
     }
     
@@ -324,7 +420,6 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         print(message)
         DispatchQueue.main.async {
             if self.logs.count > 100 { self.logs.removeFirst() }
-            
             self.logs.append(LogEntry(message: message))
         }
     }

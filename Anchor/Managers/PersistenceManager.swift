@@ -6,8 +6,9 @@
 //
 import Foundation
 import Photos
+import Combine
 
-class PersistenceManager {
+class PersistenceManager: ObservableObject {
     static let shared = PersistenceManager()
     
     private let defaults = UserDefaults.standard
@@ -18,9 +19,50 @@ class PersistenceManager {
     private let kPhotoChangeToken = "anchor_photo_change_token"
     private let kMirrorDeletions = "anchor_mirror_deletions"
     
+    private let kIsDriveEnabled = "anchor_is_drive_enabled"
+    private let kIsPhotosEnabled = "anchor_is_photos_enabled"
+    
+    private let kNotifyBackupComplete = "anchor_notify_backup_complete"
+    private let kNotifyVaultIssue = "anchor_notify_vault_issue"
+    
     var mirrorDeletions: Bool {
         get { defaults.bool(forKey: kMirrorDeletions) }
-        set { defaults.set(newValue, forKey: kMirrorDeletions) }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kMirrorDeletions)
+        }
+    }
+    
+    var isDriveEnabled: Bool {
+        get {
+            if defaults.object(forKey: kIsDriveEnabled) == nil { return false }
+            return defaults.bool(forKey: kIsDriveEnabled)
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kIsDriveEnabled)
+        }
+    }
+    
+    var notifyBackupComplete: Bool {
+        get { defaults.object(forKey: kNotifyBackupComplete) == nil ? false : defaults.bool(forKey: kNotifyBackupComplete) }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyBackupComplete) }
+    }
+    
+    var notifyVaultIssue: Bool {
+        get { defaults.object(forKey: kNotifyVaultIssue) == nil ? false : defaults.bool(forKey: kNotifyVaultIssue) }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyVaultIssue) }
+    }
+    
+    var isPhotosEnabled: Bool {
+        get {
+            if defaults.object(forKey: kIsPhotosEnabled) == nil { return false }
+            return defaults.bool(forKey: kIsPhotosEnabled)
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kIsPhotosEnabled)
+        }
     }
     
     

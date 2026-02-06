@@ -48,6 +48,36 @@ final class S3Vault: VaultProvider {
         return S3Vault(client: client, bucket: config.bucket)
     }
     
+    func loadIdentity() async throws -> VaultIdentity? {
+        let input = GetObjectInput(bucket: self.bucket, key: "anchor_identity.json")
+        
+        do {
+            let output = try await client.getObject(input: input)
+            guard let body = output.body else { return nil }
+            
+            let data = try await body.readData() ?? Data()
+            
+            return try JSONDecoder().decode(VaultIdentity.self, from: data)
+        } catch {
+            let errString = String(describing: error)
+            if errString.contains("NoSuchKey") || errString.contains("NotFound") {
+                return nil
+            }
+            throw error
+        }
+    }
+    
+    func saveIdentity(_ identity: VaultIdentity) async throws {
+        let data = try JSONEncoder().encode(identity)
+        let input = PutObjectInput(
+            body: .data(data),
+            bucket: self.bucket,
+            key: "anchor_identity.json"
+        )
+        _ = try await client.putObject(input: input)
+        print("🔐 Identity file saved to S3")
+    }
+    
     func saveFile(source: URL, relativePath: String) async throws {
         let isDirectory = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         

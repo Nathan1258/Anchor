@@ -35,6 +35,12 @@ struct SettingsView: View {
     @State private var pendingPhotoVaultURL: URL?
     @State private var showPhotoImportChoice = false
     
+    @State private var showEncryptionSheet = false
+    @State private var encryptionMode: EncryptionMode?
+    @State private var pendingVaultProvider: VaultProvider?
+    @State private var pendingVaultTypeForCheck: VaultType?
+    @State private var pendingVaultURLForCheck: URL?
+    
     var backupDescription: String {
         switch persistence.backupMode {
         case .basic:
@@ -64,6 +70,26 @@ struct SettingsView: View {
         .onChange(of: persistence.notifyVaultIssue) {
             if persistence.notifyVaultIssue {
                 NotificationManager.shared.requestPermissions()
+            }
+        }
+        .sheet(isPresented: $showEncryptionSheet) {
+            if let mode = encryptionMode {
+                EncryptionPasswordSheet(mode: mode) { success in
+                    if success {
+                        finalizeVaultSetup()
+                    } else {
+                        pendingVaultProvider = nil
+                    }
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .generatedNewIdentity)) { notification in
+            if let identity = notification.object as? VaultIdentity,
+               let provider = pendingVaultProvider {
+                Task {
+                    try? await provider.saveIdentity(identity)
+                    print("✅ Identity file written to vault.")
+                }
             }
         }
     }
@@ -106,8 +132,7 @@ struct SettingsView: View {
             Section {
                 HStack {
                     Button("Save Credentials") {
-                        persistence.s3Config = tempS3Config
-                        connectionTestMessage = nil
+                        verifyS3AndCheckEncryption()
                     }
                     .disabled(tempS3Config == persistence.s3Config)
                     
@@ -193,13 +218,9 @@ struct SettingsView: View {
                     path: driveWatcher.vaultURL,
                     icon: "externaldrive",
                     action: {
-                        driveWatcher.pickNewVaultFolder { newURL in
-                            if newURL != driveWatcher.vaultURL {
-                                pendingVaultURL = newURL
-                                showVaultSwitchAlert = true
-                            }
-                        }
-                    }
+                        pickLocalVault()
+                    },
+                    isEncrypted: CryptoManager.shared.isConfigured
                 )
             } else {
                 S3StatusRow(config: persistence.s3Config)
@@ -463,7 +484,8 @@ struct SettingsView: View {
                                         }
                                     }
                                 }
-                            }
+                            },
+                            isEncrypted: CryptoManager.shared.isConfigured
                         )
                         Text("Anchor will organize photos by Year/Month automatically.")
                             .font(.caption)
@@ -565,6 +587,78 @@ struct SettingsView: View {
             }
         }
     }
+    
+    func verifyS3AndCheckEncryption() {
+        guard tempS3Config.isValid else { return }
+        
+        Task {
+            do {
+                let provider = try await S3Vault.create(config: tempS3Config)
+                await processVaultHandshake(provider: provider, type: .s3, url: nil)
+            } catch {
+                connectionTestMessage = "Failed: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    func pickLocalVault() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Select Vault"
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                Task {
+                    let provider = LocalVault(rootURL: url)
+                    await processVaultHandshake(provider: provider, type: .local, url: url)
+                }
+            }
+        }
+    }
+    
+    // MARK: - The Handshake Logic
+    
+    func processVaultHandshake(provider: VaultProvider, type: VaultType, url: URL?) async {
+        do {
+            let identity = try await provider.loadIdentity()
+            
+            await MainActor.run {
+                self.pendingVaultProvider = provider
+                self.pendingVaultTypeForCheck = type
+                self.pendingVaultURLForCheck = url
+                
+                if let id = identity {
+                    self.encryptionMode = .unlock(id)
+                } else {
+                    self.encryptionMode = .setup(nil)
+                }
+                
+                self.showEncryptionSheet = true
+            }
+        } catch {
+            print("Error checking vault identity: \(error)")
+        }
+    }
+    
+    func finalizeVaultSetup() {
+        guard let type = pendingVaultTypeForCheck else { return }
+        
+        if type == .s3 {
+            persistence.s3Config = tempS3Config
+            persistence.driveVaultType = .s3
+        } else if type == .local, let url = pendingVaultURLForCheck {
+            persistence.driveVaultType = .local
+            driveWatcher.vaultURL = url
+            persistence.saveBookmark(for: url, type: .driveVault)
+        }
+        
+        driveWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck)
+        
+        pendingVaultProvider = nil
+        pendingVaultTypeForCheck = nil
+        pendingVaultURLForCheck = nil
+    }
 }
 
 // MARK: - Supporting Views
@@ -633,6 +727,7 @@ struct PathPickerRow: View {
     let path: URL?
     let icon: String
     let action: () -> Void
+    var isEncrypted: Bool = false
     
     var body: some View {
         HStack {
@@ -644,7 +739,7 @@ struct PathPickerRow: View {
                 Text(label)
                     .fontWeight(.medium)
                 if let p = path {
-                    Text(p.path)
+                    Text("\(p.path) \(isEncrypted ? " - Encryption Enabled" : "")")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .truncationMode(.middle)

@@ -14,6 +14,23 @@ final class LocalVault: VaultProvider {
         self.rootURL = rootURL
     }
     
+    func loadIdentity() async throws -> VaultIdentity? {
+        let identityURL = rootURL.appendingPathComponent("anchor_identity.json")
+        
+        guard FileManager.default.fileExists(atPath: identityURL.path) else {
+            return nil
+        }
+        
+        let data = try Data(contentsOf: identityURL)
+        return try JSONDecoder().decode(VaultIdentity.self, from: data)
+    }
+    
+    func saveIdentity(_ identity: VaultIdentity) async throws {
+        let identityURL = rootURL.appendingPathComponent("anchor_identity.json")
+        let data = try JSONEncoder().encode(identity)
+        try data.write(to: identityURL)
+    }
+    
     func saveFile(source: URL, relativePath: String) async throws {
         let destURL = rootURL.appendingPathComponent(relativePath)
         

@@ -37,6 +37,9 @@ class PersistenceManager: ObservableObject {
     
     private let kPausedUntil = "anchor_paused_until"
     
+    private let kS3SecretKey = "anchor_s3_secret_key"
+    
+    
     var backupMode: BackupMode {
         get {
             let raw = defaults.integer(forKey: kBackupMode)
@@ -92,14 +95,29 @@ class PersistenceManager: ObservableObject {
     var s3Config: S3Config {
         get {
             guard let data = defaults.data(forKey: kS3Config),
-                  let config = try? JSONDecoder().decode(S3Config.self, from: data) else {
+                  var config = try? JSONDecoder().decode(S3Config.self, from: data) else {
                 return S3Config()
             }
+            
+            if let secret = KeychainManager.shared.load(key: kS3SecretKey) {
+                config.secretKey = secret
+            }
+            
             return config
         }
         set {
             objectWillChange.send()
-            if let data = try? JSONEncoder().encode(newValue) {
+            
+            if !newValue.secretKey.isEmpty {
+                KeychainManager.shared.save(key: kS3SecretKey, value: newValue.secretKey)
+            } else {
+                KeychainManager.shared.delete(key: kS3SecretKey)
+            }
+            
+            var sanitizedConfig = newValue
+            sanitizedConfig.secretKey = ""
+            
+            if let data = try? JSONEncoder().encode(sanitizedConfig) {
                 defaults.set(data, forKey: kS3Config)
             }
         }

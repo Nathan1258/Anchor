@@ -703,9 +703,21 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
                 Task {
                     await performWithActivity("Uploading \(fileURL)"){
+                        var uploadSource = safeURL
+                        var uploadPath = await self.getVaultPath(for: relativePath)
+                        var wasEncrypted = false
+                        
+                        
                         do {
-                            let vaultPath = await self.getVaultPath(for: relativePath)
-                            try await provider.saveFile(source: fileURL, relativePath: vaultPath)
+                            let preparation = try await CryptoManager.shared.prepareFileForUpload(source: safeURL)
+                            uploadSource = preparation.url
+                            wasEncrypted = preparation.isEncrypted
+                            
+                            if wasEncrypted {
+                                uploadPath += ".anchor"
+                            }
+                            
+                            try await provider.saveFile(source: uploadSource, relativePath: uploadPath)
                             
                             await self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
                             
@@ -742,6 +754,8 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                                 )
                             }
                         }
+                        
+                        await CryptoManager.shared.cleanup(url: uploadSource, wasEncrypted: wasEncrypted)
                     }
                 }
             }

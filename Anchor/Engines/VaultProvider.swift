@@ -8,9 +8,6 @@ import Foundation
 
 protocol VaultProvider: Sendable {
     /// Saves a file to the vault.
-    /// - Parameters:
-    ///   - source: The local URL of the file to upload/copy.
-    ///   - relativePath: The path where it should live (e.g., "2026/02/photo.jpg").
     func saveFile(source: URL, relativePath: String) async throws
     
     /// Deletes a file from the vault.
@@ -20,6 +17,12 @@ protocol VaultProvider: Sendable {
     func fileExists(relativePath: String) async -> Bool
     
     func moveItem(from oldPath: String, to newPath: String) async throws
+    
+    /// Checks for 'anchor_identity.json' in the root.
+    func loadIdentity() async throws -> VaultIdentity?
+    
+    /// Saves the lock file during setup.
+    func saveIdentity(_ identity: VaultIdentity) async throws
 }
 
 class VaultFactory {

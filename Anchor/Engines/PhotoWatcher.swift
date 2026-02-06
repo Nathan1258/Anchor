@@ -510,21 +510,36 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
                 
                 Task {
+                    var finalSource = tempFileURL
+                            var finalRelativePath = relativePath
+                            var wasEncrypted = false
+                    
                     do {
-                        let exists = await provider.fileExists(relativePath: relativePath)
+                        let preparation = try await CryptoManager.shared.prepareFileForUpload(source: tempFileURL)
+                        finalSource = preparation.url
+                        wasEncrypted = preparation.isEncrypted
                         
-                        if !exists {
-                            try await provider.saveFile(source: tempFileURL, relativePath: relativePath)
-                            await collector.addSavedFile(filename)
+                        if wasEncrypted {
+                            finalRelativePath += ".anchor"
                         }
                         
-                        try? FileManager.default.removeItem(at: tempFileURL)
+                        let exists = await provider.fileExists(relativePath: finalRelativePath)
+                        
+                        if !exists {
+                            try await provider.saveFile(source: finalSource, relativePath: finalRelativePath)
+                            await collector.addSavedFile(filename)
+                        }
                         
                     } catch {
                         await Task { @MainActor in
                             self.log("⚠️ Upload Failed: \(filename) - \(error.localizedDescription)")
                         }.value
                     }
+                    
+                    await CryptoManager.shared.cleanup(url: finalSource, wasEncrypted: wasEncrypted)
+                    
+                    try? FileManager.default.removeItem(at: tempFileURL)
+                    
                     group.leave()
                 }
             }

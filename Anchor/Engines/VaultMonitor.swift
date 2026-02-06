@@ -58,14 +58,16 @@ class VaultMonitor {
     private func checkHealth() {
         queue.async {
             let pathExists = FileManager.default.fileExists(atPath: self.vaultURL.path)
+            let isInTrash = self.vaultURL.pathComponents.contains(".Trash") ||
+            self.vaultURL.pathComponents.contains("Trash")
             
             DispatchQueue.main.async {
-                if pathExists && !self.isConnected {
+                if (pathExists && !isInTrash) && !self.isConnected {
                     self.isConnected = true
                     print("🔌 Vault Reconnected: \(self.vaultURL.lastPathComponent)")
                     self.onReconnect?()
                     
-                } else if !pathExists && self.isConnected {
+                } else if (!pathExists || isInTrash) && self.isConnected {
                     self.isConnected = false
                     print("🔌 Vault Disconnected: \(self.vaultURL.lastPathComponent)")
                     self.onDisconnect?()

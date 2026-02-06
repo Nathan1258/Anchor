@@ -137,10 +137,11 @@ class PersistenceManager: ObservableObject {
     
     var isGlobalPaused: Bool {
         guard let date = pausedUntil else { return false }
-        if Date() < date { return true }
-        
-        pausedUntil = nil
-        return false
+        return Date() < date
+    }
+    
+    func clearPhotoToken() {
+        defaults.removeObject(forKey: kPhotoChangeToken)
     }
     
     var ignoredExtensions: [String] {

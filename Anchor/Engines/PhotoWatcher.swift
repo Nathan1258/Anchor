@@ -333,6 +333,43 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
     }
     
+    
+    func applyVaultSwitch(type: VaultType, url: URL? = nil, importHistory: Bool) {
+        self.isRunning = false
+        self.status = .waiting
+        
+        PersistenceManager.shared.clearPhotoToken()
+        self.sessionSavedCount = 0
+        self.lastPhotoProcessed = "-"
+        
+        if importHistory {
+            log("🔄 Vault switched. Starting full library export to new destination...")
+        } else {
+            let currentToken = PHPhotoLibrary.shared().currentChangeToken
+            PersistenceManager.shared.savePhotoToken(currentToken)
+            log("🏁 Baseline reset. Only new photos will be saved to the new destination.")
+        }
+        
+        PersistenceManager.shared.photoVaultType = type
+        
+        if let newUrl = url {
+            self.vaultURL = newUrl
+            PersistenceManager.shared.saveBookmark(for: newUrl, type: .photoVault)
+        } else if type == .s3 {
+            self.vaultURL = nil
+        }
+        
+        startWatching()
+    }
+    
+    func markAsUpToDate() {
+        let currentToken = PHPhotoLibrary.shared().currentChangeToken
+        
+        PersistenceManager.shared.savePhotoToken(currentToken)
+        
+        self.log("🏁 Baseline set. Skipping historical import. Only new photos will be synced.")
+    }
+    
     private func performFullScan() {
         guard NetworkMonitor.shared.status == .verified else {
             log("⏳ Waiting for Internet to start Full Scan...")
@@ -448,7 +485,8 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             group.enter()
             
             let filename = resource.originalFilename
-            let relativePath = "\(year)/\(month)/\(filename)"
+            let prefix = PersistenceManager.shared.photoVaultType == .s3 ? "photos/" : ""
+            let relativePath = "\(prefix)\(year)/\(month)/\(filename)"
             let tempFileURL = tempDir.appendingPathComponent(filename)
             
             let options = PHAssetResourceRequestOptions()

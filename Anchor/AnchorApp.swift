@@ -38,6 +38,7 @@ struct AnchorApp: App {
                 }
             }
         }
+        .menuBarExtraStyle(.window)
         
         Window("Settings", id: "settings") {
             SettingsView()
@@ -154,18 +155,9 @@ struct Main: View {
                             pauseUntilTomorrow()
                         }
                     } label: {
-                        HStack {
-                            Image(systemName: "pause.circle")
-                            Text("Pause Syncing")
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.horizontal, 8)
+                        PauseMenuLabel()
                     }
                     .menuStyle(.borderlessButton)
-                    .padding(.vertical, 4)
                 }
                 
                 Divider()
@@ -196,6 +188,34 @@ struct Main: View {
         if let tomorrow = calendar.date(byAdding: .day, value: 1, to: Date()),
            let nextMorning = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) {
             persistence.pausedUntil = nextMorning
+        }
+    }
+}
+
+struct PauseMenuLabel: View {
+    @State private var isHovered = false
+    
+    var body: some View {
+        HStack {
+            Image(systemName: "pause.circle")
+                .frame(width: 20)
+                .foregroundColor(.primary)
+            
+            Text("Pause Syncing")
+                .foregroundColor(.primary)
+            
+            Spacer()
+            
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isHovered ? Color.accentColor.opacity(0.1) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
         }
     }
 }

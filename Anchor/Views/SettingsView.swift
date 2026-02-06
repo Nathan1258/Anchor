@@ -30,6 +30,11 @@ struct SettingsView: View {
     @State private var showMirrorAlert = false
     @State private var pendingBackupMode: BackupMode?
     
+    @State private var showPhotoVaultSwitchAlert = false
+    @State private var pendingPhotoVaultType: VaultType?
+    @State private var pendingPhotoVaultURL: URL?
+    @State private var showPhotoImportChoice = false
+    
     var backupDescription: String {
         switch persistence.backupMode {
         case .basic:
@@ -244,21 +249,21 @@ struct SettingsView: View {
             }
         }
         .alert("Switch to Mirror Mode?", isPresented: $showMirrorAlert) {
-                    Button("Keep Orphans", role: .cancel) {
-                        if let mode = pendingBackupMode {
-                            persistence.backupMode = mode
-                            driveWatcher.reconcileMirrorMode(strict: false)
-                        }
-                    }
-                    Button("Delete from Vault", role: .destructive) {
-                        if let mode = pendingBackupMode {
-                            persistence.backupMode = mode
-                            driveWatcher.reconcileMirrorMode(strict: true)
-                        }
-                    }
-                } message: {
-                    Text("How would you like to handle files currently in your Vault that no longer exist on your Mac?\n\n'Delete' will remove them to make the Vault an exact copy.\n'Keep' will leave them there, only mirroring future deletions.")
+            Button("Keep Orphans", role: .cancel) {
+                if let mode = pendingBackupMode {
+                    persistence.backupMode = mode
+                    driveWatcher.reconcileMirrorMode(strict: false)
                 }
+            }
+            Button("Delete from Vault", role: .destructive) {
+                if let mode = pendingBackupMode {
+                    persistence.backupMode = mode
+                    driveWatcher.reconcileMirrorMode(strict: true)
+                }
+            }
+        } message: {
+            Text("How would you like to handle files currently in your Vault that no longer exist on your Mac?\n\n'Delete' will remove them to make the Vault an exact copy.\n'Keep' will leave them there, only mirroring future deletions.")
+        }
     }
     
     private var snapshotConfiguration: some View {
@@ -398,27 +403,128 @@ struct SettingsView: View {
     private var photosTab: some View {
         Form {
             Section {
-                Toggle("Enable Photo Backup", isOn: $persistence.isPhotosEnabled)
+                let photosBinding = Binding<Bool>(
+                    get: { persistence.isPhotosEnabled },
+                    set: { newValue in
+                        if newValue {
+                            if persistence.loadPhotoToken() == nil {
+                                showPhotoImportChoice = true
+                            } else {
+                                persistence.isPhotosEnabled = true
+                                photoWatcher.startWatching()
+                            }
+                        } else {
+                            // Turning OFF
+                            persistence.isPhotosEnabled = false
+                            photoWatcher.isRunning = false
+                            photoWatcher.status = .disabled
+                        }
+                    }
+                )
+                
+                Toggle("Enable Photo Backup", isOn: photosBinding)
                     .toggleStyle(.switch)
             }
             
             Group {
-                Section(header: Text("Backup Location")) {
-                    PathPickerRow(
-                        label: "Photo Vault",
-                        path: photoWatcher.vaultURL,
-                        icon: "photo.on.rectangle",
-                        action: photoWatcher.selectVaultFolder
-                    )
-                    Text("Anchor will organize photos by Year/Month automatically.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Section(header: Text("Destination")) {
+                    Picker("Vault Type", selection: Binding(
+                        get: { persistence.photoVaultType },
+                        set: { newValue in
+                            if newValue != persistence.photoVaultType {
+                                pendingPhotoVaultType = newValue
+                                showPhotoVaultSwitchAlert = true
+                            }
+                        }
+                    )) {
+                        ForEach(VaultType.allCases) { type in
+                            Text(type.rawValue).tag(type)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    
+                    if persistence.photoVaultType == .local {
+                        PathPickerRow(
+                            label: "Photo Vault Folder",
+                            path: photoWatcher.vaultURL,
+                            icon: "photo.on.rectangle",
+                            action: {
+                                let panel = NSOpenPanel()
+                                panel.canChooseDirectories = true
+                                panel.canChooseFiles = false
+                                panel.prompt = "Select Photo Vault"
+                                
+                                panel.begin { response in
+                                    if response == .OK, let url = panel.url {
+                                        if url != photoWatcher.vaultURL {
+                                            pendingPhotoVaultURL = url
+                                            pendingPhotoVaultType = .local
+                                            showPhotoVaultSwitchAlert = true
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                        Text("Anchor will organize photos by Year/Month automatically.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        S3StatusRow(config: persistence.s3Config)
+                        Text("Photos will be uploaded to '\(persistence.s3Config.bucket)' in Year/Month folders.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             .disabled(!persistence.isPhotosEnabled)
         }
         .tabItem { Label("Photos", systemImage: "photo") }
         .tag(3)
+        .alert("Switch Photo Vault?", isPresented: $showPhotoVaultSwitchAlert) {
+            
+            Button("Switch & Upload All") {
+                if let type = pendingPhotoVaultType {
+                    photoWatcher.applyVaultSwitch(type: type, url: pendingPhotoVaultURL, importHistory: true)
+                }
+                resetPendingState()
+            }
+            
+            Button("Switch & Only New") {
+                if let type = pendingPhotoVaultType {
+                    photoWatcher.applyVaultSwitch(type: type, url: pendingPhotoVaultURL, importHistory: false)
+                }
+                resetPendingState()
+            }
+            
+            Button("Cancel", role: .cancel) {
+                resetPendingState()
+            }
+        } message: {
+            Text("You are changing the backup destination. Do you want to re-upload your existing library to the new vault, or start fresh with only new photos?")
+        }
+        .alert("Upload Existing Photos?", isPresented: $showPhotoImportChoice) {
+            Button("Only New Photos") {
+                photoWatcher.markAsUpToDate()
+                persistence.isPhotosEnabled = true
+                photoWatcher.startWatching()
+            }
+            
+            Button("Upload Entire Library") {
+                persistence.isPhotosEnabled = true
+                photoWatcher.startWatching()
+            }
+            
+            Button("Cancel", role: .cancel) {
+                persistence.isPhotosEnabled = false
+            }
+        } message: {
+            Text("Do you want Anchor to back up all photos currently in your library, or only new photos you take from now on?")
+        }
+    }
+    
+    private func resetPendingState() {
+        pendingPhotoVaultType = nil
+        pendingPhotoVaultURL = nil
     }
     
     // MARK: - Notifications Tab

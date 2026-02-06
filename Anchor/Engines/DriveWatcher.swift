@@ -43,12 +43,20 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                if !PersistenceManager.shared.isGlobalPaused && self?.status == .paused {
+                if let date = PersistenceManager.shared.pausedUntil, Date() >= date {
+                    PersistenceManager.shared.pausedUntil = nil
                     self?.log("▶️ Global pause expired. Resuming...")
                     self?.startWatching()
                 }
             }
             .store(in: &cancellables)
+    }
+    
+    private func getVaultPath(for relativePath: String) -> String {
+        if PersistenceManager.shared.driveVaultType == .s3 {
+            return "drive/" + relativePath
+        }
+        return relativePath
     }
     
     private func setupNetworkObserver() {
@@ -219,13 +227,16 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         guard let oldRelative = getRelativePath(for: oldURL),
               let newRelative = getRelativePath(for: newURL) else { return }
         
+        let oldVaultPath = getVaultPath(for: oldRelative)
+        let newVaultPath = getVaultPath(for: newRelative)
+        
         log("🚚 Detected Move: \(oldRelative) -> \(newRelative)")
         
         ledger.renamePath(from: oldRelative, to: newRelative)
         
         Task {
             do {
-                try await vaultProvider?.moveItem(from: oldRelative, to: newRelative)
+                try await vaultProvider?.moveItem(from: oldVaultPath, to: newVaultPath)
                 self.status = .active
             } catch {
                 log("⚠️ Failed to move in Vault: \(error.localizedDescription)")
@@ -284,7 +295,11 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             var cleanedCount = 0
             
             for upload in activeUploads {
-                let fileURL = source.appendingPathComponent(upload.relativePath)
+                var localRelativePath = upload.relativePath
+                if PersistenceManager.shared.driveVaultType == .s3 && localRelativePath.hasPrefix("drive/") {
+                    localRelativePath = String(localRelativePath.dropFirst("drive/".count))
+                }
+                let fileURL = source.appendingPathComponent(localRelativePath)
                 
                 if !FileManager.default.fileExists(atPath: fileURL.path) {
                     log("🗑️ Orphan detected: \(upload.relativePath). Aborting S3 fragments...")
@@ -307,10 +322,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     private func deleteFromVault(relativePath: String) {
         guard let provider = vaultProvider else { return }
-        
+        let vaultPath = getVaultPath(for: relativePath)
         Task{
             do{
-                try await provider.deleteFile(relativePath: relativePath)
+                try await provider.deleteFile(relativePath: vaultPath)
                 ledger.removeEntry(relativePath: relativePath)
                 
                 log("🗑️ Synced Deletion: \(relativePath)")
@@ -689,7 +704,8 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 Task {
                     await performWithActivity("Uploading \(fileURL)"){
                         do {
-                            try await provider.saveFile(source: fileURL, relativePath: relativePath)
+                            let vaultPath = await self.getVaultPath(for: relativePath)
+                            try await provider.saveFile(source: fileURL, relativePath: vaultPath)
                             
                             await self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
                             

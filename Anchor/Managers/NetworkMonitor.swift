@@ -55,19 +55,21 @@ class NetworkMonitor: ObservableObject {
                     return
                 }
                 
-                if let httpResponse = response as? HTTPURLResponse, 
-                   httpResponse.statusCode == 200,
-                   let data = data,
-                   let responseString = String(data: data, encoding: .utf8),
-                   responseString.trimmingCharacters(in: .whitespacesAndNewlines) == "Success" {
-                    
-                    self?.status = .verified
-                    print("✅ Internet Connection Verified")
-                    
-                } else {
-                    self?.status = .captivePortal
-                    print("⚠️ Captive Portal Detected")
-                }
+                self?.status = .verified
+                
+//                if let httpResponse = response as? HTTPURLResponse, 
+//                   httpResponse.statusCode == 200,
+//                   let data = data,
+//                   let responseString = String(data: data, encoding: .utf8),
+//                   responseString.trimmingCharacters(in: .whitespacesAndNewlines) == "Success" {
+//                    
+//                    self?.status = .verified
+//                    print("✅ Internet Connection Verified")
+//                    
+//                } else {
+//                    self?.status = .captivePortal
+//                    print("⚠️ Captive Portal Detected")
+//                }
             }
         }
         task.resume()

@@ -92,11 +92,15 @@ final class S3Vault: VaultProvider {
     
     func uploadSingleFile(source: URL, key: String) async throws {
         let fileSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)) ?? 0
+        let MIN_PART_SIZE: Int64 = 5 * 1024 * 1024
         
         if fileSize < PART_SIZE {
             try await simpleUpload(source: source, relativePath: key)
             return
         }
+        
+        let calculatedPartSize = max(MIN_PART_SIZE, fileSize / 10000)
+        let totalParts = Int(ceil(Double(fileSize) / Double(calculatedPartSize)))
         
         let ledger = SQLiteLedger()
         var uploadID = ledger.getActiveUploadID(relativePath: key)
@@ -130,7 +134,6 @@ final class S3Vault: VaultProvider {
             let fileHandle = try FileHandle(forReadingFrom: source)
             defer { try? fileHandle.close() }
             
-            let totalParts = Int(ceil(Double(fileSize) / Double(PART_SIZE)))
             
             for partNumber in 1...totalParts {
                 if uploadedParts.contains(where: { $0.partNumber == partNumber }) {
@@ -138,9 +141,9 @@ final class S3Vault: VaultProvider {
                     continue
                 }
                 
-                let offset = UInt64((partNumber - 1)) * UInt64(PART_SIZE)
+                let offset = UInt64((partNumber - 1)) * UInt64(calculatedPartSize)
                 try fileHandle.seek(toOffset: offset)
-                let chunkData = try fileHandle.read(upToCount: Int(PART_SIZE)) ?? Data()
+                let chunkData = try fileHandle.read(upToCount: Int(calculatedPartSize)) ?? Data()
                 
                 if chunkData.isEmpty { break }
                 
@@ -223,13 +226,13 @@ final class S3Vault: VaultProvider {
     }
     
     func deleteFile(relativePath: String) async throws {
-        let input = DeleteObjectInput(
-            bucket: self.bucket,
-            key: relativePath
-        )
-        
+        let input = DeleteObjectInput(bucket: self.bucket, key: relativePath)
         _ = try await client.deleteObject(input: input)
-        print("☁️ S3 Delete Success: \(relativePath)")
+        
+        let zipInput = DeleteObjectInput(bucket: self.bucket, key: relativePath + ".zip")
+        _ = try await client.deleteObject(input: zipInput)
+        
+        print("☁️ S3 Delete Success: \(relativePath) (and potential .zip)")
     }
     
     func fileExists(relativePath: String) async -> Bool {

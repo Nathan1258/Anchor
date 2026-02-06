@@ -33,6 +33,27 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         super.init()
         restoreState()
         setupPauseObserver()
+        setupNetworkObserver()
+    }
+    
+    private func setupNetworkObserver() {
+        NetworkMonitor.shared.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                guard let self = self else { return }
+                
+                if status == .verified {
+                    if self.status == .paused && !PersistenceManager.shared.isGlobalPaused {
+                        self.log("✅ Internet restored. Resuming Photo Watcher...")
+                        self.checkForChanges() // Trigger a check immediately
+                    }
+                }
+                else if status == .disconnected || status == .captivePortal {
+                    self.log("⚠️ Network issue. Pausing Photo Watcher.")
+                    self.status = .paused
+                }
+            }
+            .store(in: &cancellables)
     }
     
     private func setupPauseObserver() {
@@ -227,6 +248,22 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     private func processDelta(_ changes: PHPersistentChangeFetchResult) {
         exportQueue.async {
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Processing Photo Batch"
+            )
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            
+            let isNetworkReady = DispatchQueue.main.sync {
+                return NetworkMonitor.shared.status == .verified
+            }
+            
+            if !isNetworkReady {
+                self.log("⏳ Network unavailable. Skipping photo sync (will retry).")
+                DispatchQueue.main.async { self.status = .paused }
+                return
+            }
+            
             let shouldContinue = DispatchQueue.main.sync {
                 if PersistenceManager.shared.isGlobalPaused {
                     self.status = .paused
@@ -297,6 +334,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     private func performFullScan() {
+        guard NetworkMonitor.shared.status == .verified else {
+            log("⏳ Waiting for Internet to start Full Scan...")
+            self.status = .paused
+            return
+        }
+        
         guard self.status != .waitingForVault,
               PersistenceManager.shared.isPhotosEnabled else { return }
         
@@ -396,6 +439,10 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         
         let collector = ResultsCollector()
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Exporting Photo"
+        )
         
         for resource in resources {
             group.enter()

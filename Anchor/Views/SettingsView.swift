@@ -23,6 +23,13 @@ struct SettingsView: View {
     @State private var connectionTestMessage: String? = nil
     @State private var connectionTestSuccess: Bool = false
     
+    @State private var showVaultSwitchAlert = false
+    @State private var pendingVaultType: VaultType?
+    @State private var pendingVaultURL: URL?
+    
+    @State private var showMirrorAlert = false
+    @State private var pendingBackupMode: BackupMode?
+    
     var backupDescription: String {
         switch persistence.backupMode {
         case .basic:
@@ -160,7 +167,15 @@ struct SettingsView: View {
     
     private var driveDestinationSection: some View {
         Section(header: Text("Destination")) {
-            Picker("Vault Type", selection: $persistence.driveVaultType) {
+            Picker("Vault Type", selection: Binding(
+                get: { persistence.driveVaultType },
+                set: { newValue in
+                    if newValue != persistence.driveVaultType {
+                        pendingVaultType = newValue
+                        showVaultSwitchAlert = true
+                    }
+                }
+            )) {
                 ForEach(VaultType.allCases) { type in
                     Text(type.rawValue).tag(type)
                 }
@@ -172,11 +187,31 @@ struct SettingsView: View {
                     label: "Local Vault Folder",
                     path: driveWatcher.vaultURL,
                     icon: "externaldrive",
-                    action: driveWatcher.selectVaultFolder
+                    action: {
+                        driveWatcher.pickNewVaultFolder { newURL in
+                            if newURL != driveWatcher.vaultURL {
+                                pendingVaultURL = newURL
+                                showVaultSwitchAlert = true
+                            }
+                        }
+                    }
                 )
             } else {
                 S3StatusRow(config: persistence.s3Config)
             }
+        }
+        .alert("Switch Vault Destination?", isPresented: $showVaultSwitchAlert) {
+            Button("Cancel", role: .cancel) {
+                pendingVaultType = nil
+                pendingVaultURL = nil
+            }
+            Button("Confirm & Re-scan", role: .destructive) {
+                driveWatcher.applyVaultSwitch(type: pendingVaultType, url: pendingVaultURL)
+                pendingVaultType = nil
+                pendingVaultURL = nil
+            }
+        } message: {
+            Text("Switching vaults requires a full re-scan to ensure all files are safe.\n\nAnchor will forget previous sync history and verify your library against the new destination.")
         }
     }
     
@@ -187,10 +222,20 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
         ) {
-            Picker("Mode", selection: $persistence.backupMode) {
+            Picker("Mode", selection: Binding(
+                get: { persistence.backupMode },
+                set: { newValue in
+                    if newValue == .mirror && persistence.backupMode != .mirror {
+                        pendingBackupMode = newValue
+                        showMirrorAlert = true
+                    } else {
+                        persistence.backupMode = newValue
+                    }
+                }
+            )) {
                 Text("Basic").tag(BackupMode.basic)
                 Text("Mirror").tag(BackupMode.mirror)
-//                Text("Snapshots").tag(BackupMode.snapshot)
+                // Text("Snapshots").tag(BackupMode.snapshot)
             }
             .pickerStyle(.segmented)
             
@@ -198,11 +243,22 @@ struct SettingsView: View {
                 snapshotConfiguration
             }
         }
-        .onChange(of: persistence.backupMode) { oldValue, newValue in
-            if newValue == .mirror {
-                // Show alert asking if the user wants to delete files already deleted in iCloud or not
-            }
-        }
+        .alert("Switch to Mirror Mode?", isPresented: $showMirrorAlert) {
+                    Button("Keep Orphans", role: .cancel) {
+                        if let mode = pendingBackupMode {
+                            persistence.backupMode = mode
+                            driveWatcher.reconcileMirrorMode(strict: false)
+                        }
+                    }
+                    Button("Delete from Vault", role: .destructive) {
+                        if let mode = pendingBackupMode {
+                            persistence.backupMode = mode
+                            driveWatcher.reconcileMirrorMode(strict: true)
+                        }
+                    }
+                } message: {
+                    Text("How would you like to handle files currently in your Vault that no longer exist on your Mac?\n\n'Delete' will remove them to make the Vault an exact copy.\n'Keep' will leave them there, only mirroring future deletions.")
+                }
     }
     
     private var snapshotConfiguration: some View {

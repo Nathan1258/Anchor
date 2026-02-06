@@ -12,6 +12,9 @@ struct DashboardView: View {
     @EnvironmentObject var photosWatcher: PhotoWatcher
     
     @ObservedObject var persistence = PersistenceManager.shared
+    @ObservedObject var network = NetworkMonitor.shared
+    
+    
     @Environment(\.openWindow) var openWindow
     
     var body: some View {
@@ -37,6 +40,22 @@ struct DashboardView: View {
             }
             .padding()
             .background(Color(nsColor: .windowBackgroundColor))
+            
+            if network.status == .disconnected {
+                StatusBanner(
+                    text: "No Internet Connection",
+                    subtext: "Syncing paused until connection is restored.",
+                    color: .red,
+                    icon: "wifi.slash"
+                )
+            } else if network.status == .captivePortal {
+                StatusBanner(
+                    text: "Wi-Fi Login Required",
+                    subtext: "You are connected to Wi-Fi, but internet is blocked. Please log in via your browser.",
+                    color: .orange,
+                    icon: "exclamationmark.triangle.fill"
+                )
+            }
             
             if persistence.isGlobalPaused {
                 HStack {
@@ -262,5 +281,35 @@ struct MetricColumn: View {
                 .foregroundColor(.secondary)
                 .textCase(.uppercase)
         }
+    }
+}
+
+struct StatusBanner: View {
+    let text: String
+    let subtext: String
+    let color: Color
+    let icon: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(color)
+                .frame(height: 24)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text)
+                    .fontWeight(.bold)
+                    .foregroundColor(color)
+                
+                Text(subtext)
+                    .font(.caption)
+                    .foregroundColor(.primary.opacity(0.8))
+            }
+            Spacer()
+        }
+        .padding()
+        .background(color.opacity(0.1))
+        .overlay(Rectangle().frame(height: 1).foregroundColor(color.opacity(0.3)), alignment: .bottom)
     }
 }

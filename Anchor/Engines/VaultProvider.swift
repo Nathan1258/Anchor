@@ -6,7 +6,7 @@
 //
 import Foundation
 
-protocol VaultProvider {
+protocol VaultProvider: Sendable {
     /// Saves a file to the vault.
     /// - Parameters:
     ///   - source: The local URL of the file to upload/copy.
@@ -18,6 +18,8 @@ protocol VaultProvider {
     
     /// Checks if a file exists (Optional optimization, avoiding re-uploads).
     func fileExists(relativePath: String) async -> Bool
+    
+    func moveItem(from oldPath: String, to newPath: String) async throws
 }
 
 class VaultFactory {

@@ -6,7 +6,7 @@
 //
 import Foundation
 
-class LocalVault: VaultProvider {
+final class LocalVault: VaultProvider {
     
     private let rootURL: URL
     
@@ -16,6 +16,14 @@ class LocalVault: VaultProvider {
     
     func saveFile(source: URL, relativePath: String) async throws {
         let destURL = rootURL.appendingPathComponent(relativePath)
+        
+        let resources = try source.resourceValues(forKeys: [.fileSizeKey])
+        let requiredSpace = Int64(resources.fileSize ?? 0)
+        
+        let values = try rootURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let available = values.volumeAvailableCapacityForImportantUsage, available < requiredSpace {
+            throw VaultError.diskFull(required: requiredSpace, available: available)
+        }
         
         try FileManager.default.createDirectory(
             at: destURL.deletingLastPathComponent(),
@@ -37,6 +45,16 @@ class LocalVault: VaultProvider {
             try FileManager.default.removeItem(at: destURL)
             print("🗑️ Local Delete Success: \(relativePath)")
         }
+    }
+    
+    func moveItem(from oldPath: String, to newPath: String) async throws {
+        let src = rootURL.appendingPathComponent(oldPath)
+        let dst = rootURL.appendingPathComponent(newPath)
+        
+        try FileManager.default.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        
+        try FileManager.default.moveItem(at: src, to: dst)
+        print("📂 Local Move Success: \(oldPath) -> \(newPath)")
     }
     
     func fileExists(relativePath: String) async -> Bool {

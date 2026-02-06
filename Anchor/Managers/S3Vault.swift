@@ -13,10 +13,15 @@ import SmithyIdentity
 import AWSClientRuntime
 internal import ClientRuntime
 
-class S3Vault: VaultProvider {
+final class S3Vault: VaultProvider {
     
     private let client: S3Client
     private let bucket: String
+    
+    private let PART_SIZE: Int64 = 5 * 1024 * 1024
+    
+    typealias CompletedPart = S3ClientTypes.CompletedPart
+    typealias CompletedMultipartUpload = S3ClientTypes.CompletedMultipartUpload
     
     private init(client: S3Client, bucket: String) {
         self.client = client
@@ -44,25 +49,177 @@ class S3Vault: VaultProvider {
     }
     
     func saveFile(source: URL, relativePath: String) async throws {
-        let fileData = try Data(contentsOf: source)
+        let isDirectory = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         
-        let input = PutObjectInput(
-            body: .data(fileData),
-            bucket: self.bucket,
-            key: relativePath
-        )
+        if isDirectory {
+            try await savePackage(source: source, relativePath: relativePath)
+        } else {
+            try await uploadSingleFile(source: source, key: relativePath)
+        }
+    }
+    
+    private func savePackage(source: URL, relativePath: String) async throws {
+        let zipName = source.lastPathComponent + ".zip"
+        let tempDir = FileManager.default.temporaryDirectory
+        let tempZipURL = tempDir.appendingPathComponent(UUID().uuidString).appendingPathComponent(zipName)
+        
+        try FileManager.default.createDirectory(at: tempZipURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.arguments = ["-r", "-y", tempZipURL.path, source.lastPathComponent]
+        process.currentDirectoryURL = source.deletingLastPathComponent()
+        
+        try process.run()
+        process.waitUntilExit()
+        
+        guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: tempZipURL.path) else {
+            throw NSError(domain: "Anchor", code: 501, userInfo: [NSLocalizedDescriptionKey: "Failed to zip package"])
+        }
+        
+        let uploadKey = relativePath.hasSuffix(".zip") ? relativePath : relativePath + ".zip"
+        
+        print("📦 Zipped Package: \(source.lastPathComponent) -> \(uploadKey)")
         
         do {
-            _ = try await client.putObject(input: input)
-            print("☁️ S3 Upload Success: \(relativePath)")
-        } catch let error as AWSServiceError {
-            // 🔍 DEEP DEBUGGING
-            print("❌ S3 UPLOAD FAILED [AWS Service Error]")
-            print("   - Message: \(error.message ?? "None")")
+            try await uploadSingleFile(source: tempZipURL, key: uploadKey)
+            try FileManager.default.removeItem(at: tempZipURL)
         } catch {
-            print("❌ Standard S3 Error: \(error)")
+            try? FileManager.default.removeItem(at: tempZipURL)
             throw error
         }
+    }
+    
+    func uploadSingleFile(source: URL, key: String) async throws {
+        let fileSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)) ?? 0
+        
+        if fileSize < PART_SIZE {
+            try await simpleUpload(source: source, relativePath: key)
+            return
+        }
+        
+        let ledger = SQLiteLedger()
+        var uploadID = ledger.getActiveUploadID(relativePath: key)
+        
+        if uploadID == nil {
+            let createInput = CreateMultipartUploadInput(bucket: bucket, key: key)
+            let response = try await client.createMultipartUpload(input: createInput)
+            uploadID = response.uploadId
+            if let id = uploadID {
+                ledger.saveUploadID(relativePath: key, uploadID: id)
+                print("🚀 Started Multipart Upload: \(key)")
+            }
+        }
+        
+        guard let currentUploadID = uploadID else {
+            throw NSError(domain: "Anchor", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to get Upload ID"])
+        }
+        
+        var uploadedParts: [CompletedPart] = []
+        
+        do {
+            let listInput = ListPartsInput(bucket: bucket, key: key, uploadId: currentUploadID)
+            let listResponse = try await client.listParts(input: listInput)
+            
+            if let parts = listResponse.parts {
+                for part in parts {
+                    uploadedParts.append(CompletedPart(eTag: part.eTag, partNumber: part.partNumber))
+                }
+            }
+            
+            let fileHandle = try FileHandle(forReadingFrom: source)
+            defer { try? fileHandle.close() }
+            
+            let totalParts = Int(ceil(Double(fileSize) / Double(PART_SIZE)))
+            
+            for partNumber in 1...totalParts {
+                if uploadedParts.contains(where: { $0.partNumber == partNumber }) {
+                    print("⏩ Skipping part \(partNumber) (Already uploaded)")
+                    continue
+                }
+                
+                let offset = UInt64((partNumber - 1)) * UInt64(PART_SIZE)
+                try fileHandle.seek(toOffset: offset)
+                let chunkData = try fileHandle.read(upToCount: Int(PART_SIZE)) ?? Data()
+                
+                if chunkData.isEmpty { break }
+                
+                print("⬆️ Uploading part \(partNumber)/\(totalParts)...")
+                let uploadPartInput = UploadPartInput(
+                    body: .data(chunkData),
+                    bucket: bucket,
+                    key: key,
+                    partNumber: partNumber,
+                    uploadId: currentUploadID
+                )
+                
+                let partResponse = try await client.uploadPart(input: uploadPartInput)
+                uploadedParts.append(CompletedPart(eTag: partResponse.eTag, partNumber: partNumber))
+            }
+            
+            let completeInput = CompleteMultipartUploadInput(
+                bucket: bucket,
+                key: key,
+                multipartUpload: CompletedMultipartUpload(parts: uploadedParts.sorted { $0.partNumber! < $1.partNumber! }),
+                uploadId: currentUploadID
+            )
+            
+            _ = try await client.completeMultipartUpload(input: completeInput)
+            
+            ledger.removeUploadID(relativePath: key)
+            print("✅ Multipart Upload Complete: \(key)")
+            
+        } catch {
+            print("⚠️ Multipart Error: \(error)")
+            
+            if !FileManager.default.fileExists(atPath: source.path) {
+                print("🗑️ Source file missing. Aborting S3 upload to cleanup.")
+                try? await abortUpload(key: key, uploadId: currentUploadID)
+                ledger.removeUploadID(relativePath: key)
+            }
+            throw error
+        }
+    }
+    
+    func moveItem(from oldPath: String, to newPath: String) async throws {
+        let listInput = ListObjectsV2Input(bucket: self.bucket, prefix: oldPath)
+        let output = try await client.listObjectsV2(input: listInput)
+        
+        guard let objects = output.contents, !objects.isEmpty else { return }
+        
+        print("☁️ S3 Move Detected: Processing \(objects.count) items...")
+        
+        for object in objects {
+            guard let oldKey = object.key else { continue }
+            
+            let suffix = String(oldKey.dropFirst(oldPath.count))
+            let newKey = newPath + suffix
+            
+            let copyInput = CopyObjectInput(
+                bucket: self.bucket,
+                copySource: "\(self.bucket)/\(oldKey)",
+                key: newKey
+            )
+            
+            _ = try await client.copyObject(input: copyInput)
+            
+            let deleteInput = DeleteObjectInput(bucket: self.bucket, key: oldKey)
+            _ = try await client.deleteObject(input: deleteInput)
+        }
+        
+        print("✅ S3 Smart Move Complete: \(oldPath) -> \(newPath)")
+    }
+    
+    private func simpleUpload(source: URL, relativePath: String) async throws {
+        let data = try Data(contentsOf: source) 
+        let input = PutObjectInput(body: .data(data), bucket: bucket, key: relativePath)
+        _ = try await client.putObject(input: input)
+        print("☁️ Simple Upload Success: \(relativePath)")
+    }
+    
+    func abortUpload(key: String, uploadId: String) async throws {
+        let input = AbortMultipartUploadInput(bucket: bucket, key: key, uploadId: uploadId)
+        _ = try await client.abortMultipartUpload(input: input)
     }
     
     func deleteFile(relativePath: String) async throws {

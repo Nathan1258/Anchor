@@ -81,6 +81,14 @@ class PersistenceManager: ObservableObject {
         }
     }
     
+    var notifyVaultIssue: Bool {
+        get {
+            guard let val = defaults.object(forKey: kNotifyVaultIssue) else { return true }
+            return defaults.bool(forKey: kNotifyVaultIssue)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyVaultIssue) }
+    }
+    
     var s3Config: S3Config {
         get {
             guard let data = defaults.data(forKey: kS3Config),
@@ -148,11 +156,6 @@ class PersistenceManager: ObservableObject {
     var notifyBackupComplete: Bool {
         get { defaults.object(forKey: kNotifyBackupComplete) == nil ? false : defaults.bool(forKey: kNotifyBackupComplete) }
         set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyBackupComplete) }
-    }
-    
-    var notifyVaultIssue: Bool {
-        get { defaults.object(forKey: kNotifyVaultIssue) == nil ? false : defaults.bool(forKey: kNotifyVaultIssue) }
-        set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyVaultIssue) }
     }
     
     var isPhotosEnabled: Bool {

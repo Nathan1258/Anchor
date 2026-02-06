@@ -30,10 +30,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     private var vaultMonitor: VaultMonitor?
     private var cancellables = Set<AnyCancellable>()
     
+    private var debounceTasks: [URL: DispatchWorkItem] = [:]
+    
     override init() {
         super.init()
         restoreState()
         setupPauseObserver()
+        setupNetworkObserver()
     }
     
     private func setupPauseObserver() {
@@ -43,6 +46,25 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 if !PersistenceManager.shared.isGlobalPaused && self?.status == .paused {
                     self?.log("▶️ Global pause expired. Resuming...")
                     self?.startWatching()
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func setupNetworkObserver() {
+        NetworkMonitor.shared.$status
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                guard let self = self else { return }
+                
+                if status == .verified {
+                    if self.status == .paused {
+                        self.log("✅ Internet restored. Resuming...")
+                        self.startWatching()
+                    }
+                } else if status == .disconnected || status == .captivePortal {
+                    self.log("⚠️ Network issue detected. Pausing Watcher.")
+                    self.status = .paused
                 }
             }
             .store(in: &cancellables)
@@ -89,7 +111,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         
         DispatchQueue.main.async { self.status = .newItem }
         log("✨ New Item Detected: \(url.lastPathComponent)")
-        handleIncomingFile(at: url)
+        debounceFileEvent(at: url)
     }
     
     func presentedSubitemDidChange(at url: URL) {
@@ -101,7 +123,115 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         
         DispatchQueue.main.async { self.status = .changeDetected }
         log("Hz Change Detected: \(url.lastPathComponent)")
-        handleIncomingFile(at: url)
+        debounceFileEvent(at: url)
+    }
+    
+    private func debounceFileEvent(at url: URL) {
+        if let existingTask = debounceTasks[url] {
+            existingTask.cancel()
+        }
+        
+        let task = DispatchWorkItem { [weak self] in
+            self?.debounceTasks.removeValue(forKey: url)
+            self?.handleIncomingFile(at: url)
+        }
+        
+        debounceTasks[url] = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: task)
+    }
+    
+    func pickNewVaultFolder(completion: @escaping (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Select New Vault"
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                completion(url)
+            }
+        }
+    }
+    
+    func applyVaultSwitch(type: VaultType? = nil, url: URL? = nil) {
+        self.status = .idle
+        self.isRunning = false
+        
+        ledger.wipe()
+        self.sessionScannedCount = 0
+        self.sessionVaultedCount = 0
+        
+        if let newType = type {
+            PersistenceManager.shared.driveVaultType = newType
+        }
+        
+        if let newUrl = url {
+            self.vaultURL = newUrl
+            PersistenceManager.shared.saveBookmark(for: newUrl, type: .driveVault)
+        }
+        
+        log("🔄 Vault switched. Starting fresh scan...")
+        startWatching()
+    }
+    
+    func reconcileMirrorMode(strict: Bool) {
+        guard strict else {
+            log("ℹ️ Switched to Mirror Mode. Only future deletions will be synced.")
+            return
+        }
+        
+        guard let source = sourceURL else { return }
+        
+        Task {
+            self.status = .scanning
+            log("🧹 Starting Reconciliation Scan (Strict Mirror)...")
+            
+            let trackedFiles = ledger.getAllTrackedPaths()
+            var deletedCount = 0
+            
+            for relativePath in trackedFiles {
+                let sourceFile = source.appendingPathComponent(relativePath)
+                
+                if !FileManager.default.fileExists(atPath: sourceFile.path) {
+                    log("🗑️ Found orphan: \(relativePath). Deleting from Vault...")
+                    
+                    self.deleteFromVault(relativePath: relativePath)
+                    deletedCount += 1
+                }
+            }
+            
+            DispatchQueue.main.async {
+                self.status = .idle
+                if deletedCount > 0 {
+                    self.log("✅ Reconciliation Complete. Removed \(deletedCount) old files from Vault.")
+                } else {
+                    self.log("✅ Reconciliation Complete. Vault perfectly matches Source.")
+                }
+            }
+        }
+    }
+    
+    func presentedSubitem(at oldURL: URL, didMoveTo newURL: URL) {
+        if PersistenceManager.shared.isGlobalPaused { return }
+        
+        if ExclusionManager.shared.shouldIgnore(url: newURL) { return }
+        
+        guard let oldRelative = getRelativePath(for: oldURL),
+              let newRelative = getRelativePath(for: newURL) else { return }
+        
+        log("🚚 Detected Move: \(oldRelative) -> \(newRelative)")
+        
+        ledger.renamePath(from: oldRelative, to: newRelative)
+        
+        Task {
+            do {
+                try await vaultProvider?.moveItem(from: oldRelative, to: newRelative)
+                self.status = .active
+            } catch {
+                log("⚠️ Failed to move in Vault: \(error.localizedDescription)")
+                self.handleIncomingFile(at: newURL)
+            }
+        }
     }
     
     private func getRelativePath(for url: URL) -> String? {
@@ -138,6 +268,40 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             processFile(at: url, genID: metadata.genID, relativePath: metadata.relativePath)
         } else {
             DispatchQueue.main.async { self.status = .monitoring }
+        }
+    }
+    
+    private func cleanupStaleUploads() {
+        guard let s3Vault = vaultProvider as? S3Vault,
+              let source = sourceURL else { return }
+        
+        Task {
+            let activeUploads = ledger.getAllActiveUploads()
+            if activeUploads.isEmpty { return }
+            
+            log("🧹 Checking \(activeUploads.count) pending uploads for staleness...")
+            
+            var cleanedCount = 0
+            
+            for upload in activeUploads {
+                let fileURL = source.appendingPathComponent(upload.relativePath)
+                
+                if !FileManager.default.fileExists(atPath: fileURL.path) {
+                    log("🗑️ Orphan detected: \(upload.relativePath). Aborting S3 fragments...")
+                    
+                    do {
+                        try await s3Vault.abortUpload(key: upload.relativePath, uploadId: upload.uploadID)
+                        ledger.removeUploadID(relativePath: upload.relativePath)
+                        cleanedCount += 1
+                    } catch {
+                        log("⚠️ Failed to clean orphan: \(error.localizedDescription)")
+                    }
+                }
+            }
+            
+            if cleanedCount > 0 {
+                log("✨ Cleaned up \(cleanedCount) incomplete uploads.")
+            }
         }
     }
     
@@ -251,6 +415,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                     self.status = .active
                     self.log("👀 Watcher Active (\(type == .s3 ? "Cloud Mode" : "Local Mode"))")
                     
+                    self.cleanupStaleUploads()
                     self.performInitialScan()
                 }
                 
@@ -328,6 +493,11 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     
     func performInitialScan() {
+        guard NetworkMonitor.shared.status == .verified else {
+            log("⏳ Waiting for Internet to start Smart Scan...")
+            self.status = .paused
+            return
+        }
         if PersistenceManager.shared.isGlobalPaused { self.status = .paused; return }
         guard PersistenceManager.shared.isDriveEnabled else { return }
         guard let source = sourceURL else { return }
@@ -342,6 +512,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Anchor Smart Scan"
+            )
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            
             if PersistenceManager.shared.isGlobalPaused {
                 DispatchQueue.main.async { self.status = .paused }
                 return
@@ -352,7 +528,8 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             let keys: [URLResourceKey] = [
                 .ubiquitousItemDownloadingStatusKey,
                 .generationIdentifierKey,
-                .isDirectoryKey
+                .isDirectoryKey,
+                .isPackageKey
             ]
             
             guard let enumerator = fileManager.enumerator(at: source, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { return }
@@ -377,6 +554,19 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                         enumerator.skipDescendants()
                     }
                     continue
+                }
+                
+                let resourceValues = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+                let isDirectory = resourceValues?.isDirectory ?? false
+                let isPackage = resourceValues?.isPackage ?? false
+                
+                if isDirectory {
+                    if isPackage {
+                        // It's a Bundle (e.g. .app, .numbers).
+                        enumerator.skipDescendants()
+                    } else {
+                        continue
+                    }
                 }
                 
                 guard let metadata = self.extractMetadata(for: fileURL) else { continue }
@@ -414,22 +604,27 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     private func extractMetadata(for url: URL) -> (genID: String, relativePath: String)? {
         guard let source = sourceURL else { return nil }
         
-        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey]), values.isDirectory == true {
-            return nil
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isPackageKey, .generationIdentifierKey]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        
+       if values.isDirectory == true {
+            let isPackage = values.isPackage ?? false
+            if !isPackage {
+                return nil
+            }
         }
         
-        let filePath = url.path
-        let sourcePath = source.path
+        let filePath = url.standardized.path
+        let sourcePath = source.standardized.path
+        
         if !filePath.hasPrefix(sourcePath) { return nil }
+        
         var relativePath = String(filePath.dropFirst(sourcePath.count))
         while relativePath.hasPrefix("/") {
             relativePath.removeFirst()
         }
         
-        let keys: Set<URLResourceKey> = [.generationIdentifierKey]
-        
-        guard let values = try? url.resourceValues(forKeys: keys),
-              let rawID = values.generationIdentifier else {
+        guard let rawID = values.generationIdentifier else {
             return ("unknown_\(Date().timeIntervalSince1970)", relativePath)
         }
         
@@ -438,8 +633,21 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func processFile(at url: URL, genID: String, relativePath: String) {
+        guard NetworkMonitor.shared.status == .verified else {
+            log("⏳ Queued \(url.lastPathComponent) (Waiting for Internet)")
+            return
+        }
         DispatchQueue.main.async {
             self.lastFileProcessed = url.lastPathComponent
+        }
+        
+        if let storedPath = ledger.getStoredCasing(for: relativePath) {
+            if storedPath != relativePath {
+                log("🔠 Case change detected: \(storedPath) -> \(relativePath)")
+                Task {
+                    try? await vaultProvider?.deleteFile(relativePath: storedPath)
+                }
+            }
         }
         
         do {
@@ -463,27 +671,67 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     private func copyToVault(fileURL: URL, relativePath: String, genID: String) {
         guard let provider = vaultProvider else { return }
         
-        Task {
-            do {
-                try await provider.saveFile(source: fileURL, relativePath: relativePath)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var coordError: NSError?
+            
+            coordinator.coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &coordError) { safeURL in
                 
-                ledger.markAsProcessed(relativePath: relativePath, genID: genID)
+                let fileSize = (try? safeURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 
-                DispatchQueue.main.async {
-                    self.sessionVaultedCount += 1
-                    self.lastSyncTime = Date()
-                    self.status = .vaulted(filename: fileURL.lastPathComponent)
+                if fileSize == 0 {
+                    self.log("⚠️ Zero-byte file detected after lock release: \(safeURL.lastPathComponent). Skipping.")
+                    return
                 }
-            } catch {
-                log("⚠️ Upload/Copy Failed: \(error.localizedDescription)")
                 
-                if (error as NSError).domain == NSCocoaErrorDomain {
-                    NotificationManager.shared.send(
-                        title: "Vault Error",
-                        body: "Failed to save file. Check your connection.",
-                        type: .vaultIssue
-                    )
+                Task {
+                    await performWithActivity("Uploading \(fileURL)"){
+                        do {
+                            try await provider.saveFile(source: fileURL, relativePath: relativePath)
+                            
+                            await self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
+                            
+                            await MainActor.run {
+                                self.sessionVaultedCount += 1
+                                self.lastSyncTime = Date()
+                                self.status = .vaulted(filename: fileURL.lastPathComponent)
+                            }
+                        }catch let error as VaultError {
+                            if case .diskFull(let required, _) = error {
+                                let sizeStr = ByteCountFormatter.string(fromByteCount: required, countStyle: .file)
+                                
+                                await MainActor.run{
+                                    self.log("⛔️ Backup Failed: Disk Full. Needed \(sizeStr).")
+                                    self.status = .disabled
+                                }
+                                
+                                DispatchQueue.main.async {
+                                    NotificationManager.shared.send(
+                                        title: "Backup Failed: Disk Full",
+                                        body: "Anchor requires \(sizeStr) to back up '\(safeURL.lastPathComponent)'. Sync has been paused.",
+                                        type: .vaultIssue
+                                    )
+                                }
+                            }
+                        } catch {
+                            await self.log("⚠️ Upload/Copy Failed: \(error.localizedDescription)")
+                            
+                            if (error as NSError).domain == NSCocoaErrorDomain {
+                                await NotificationManager.shared.send(
+                                    title: "Vault Error",
+                                    body: "Failed to save file. Check your connection.",
+                                    type: .vaultIssue
+                                )
+                            }
+                        }
+                    }
                 }
+            }
+            
+            if let error = coordError {
+                self.log("🔒 Locked File Skipped: \(error.localizedDescription)")
             }
         }
     }

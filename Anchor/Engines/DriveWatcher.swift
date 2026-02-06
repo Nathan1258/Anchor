@@ -26,9 +26,8 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     @Published var logs: [LogEntry] = []
     
     private let ledger = SQLiteLedger()
-    
+    private var vaultProvider: VaultProvider?
     private var vaultMonitor: VaultMonitor?
-    
     private var cancellables = Set<AnyCancellable>()
     
     override init() {
@@ -56,15 +55,20 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             }
         }
         
-        if let vault = PersistenceManager.shared.loadBookmark(type: .driveVault) {
-            if vault.startAccessingSecurityScopedResource() {
-                self.vaultURL = vault
-            }
+        if PersistenceManager.shared.driveVaultType == .local,
+           let vault = PersistenceManager.shared.loadBookmark(type: .driveVault),
+           vault.startAccessingSecurityScopedResource(){
+            self.vaultURL = vault
         }
         
-        if sourceURL != nil && vaultURL != nil {
-            log("♻️ Restored previous session. Auto-starting...")
-            startWatching()
+        if sourceURL != nil {
+            let isLocalReady = (PersistenceManager.shared.driveVaultType == .local && vaultURL != nil)
+            let isS3Ready = (PersistenceManager.shared.driveVaultType == .s3 && PersistenceManager.shared.s3Config.isValid)
+            
+            if isLocalReady || isS3Ready {
+                log("♻️ Restored previous session. Auto-starting...")
+                startWatching()
+            }
         }
     }
     
@@ -105,7 +109,11 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         let filePath = url.path
         let sourcePath = source.path
         if !filePath.hasPrefix(sourcePath) { return nil }
-        return String(filePath.dropFirst(sourcePath.count))
+        var relative = String(filePath.dropFirst(sourcePath.count))
+        while relative.hasPrefix("/") {
+            relative.removeFirst()
+        }
+        return relative
     }
     
     private func handleIncomingFile(at url: URL) {
@@ -134,24 +142,23 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func deleteFromVault(relativePath: String) {
-        guard let vault = vaultURL else { return }
-        let destURL = URL(fileURLWithPath: vault.path + relativePath)
+        guard let provider = vaultProvider else { return }
         
-        do {
-            if FileManager.default.fileExists(atPath: destURL.path) {
-                try FileManager.default.removeItem(at: destURL)
+        Task{
+            do{
+                try await provider.deleteFile(relativePath: relativePath)
                 ledger.removeEntry(relativePath: relativePath)
-                log("🗑️ Synced Deletion: \(relativePath)")
                 
+                log("🗑️ Synced Deletion: \(relativePath)")
                 DispatchQueue.main.async {
-                    self.status = .deleted(filename: destURL.lastPathComponent)
+                    self.status = .deleted(filename: (relativePath as NSString).lastPathComponent)
                 }
+            } catch {
+                log("⚠️ Failed to delete vault copy: \(error.localizedDescription)")
             }
-        } catch {
-            log("⚠️ Failed to delete vault copy: \(error.localizedDescription)")
         }
     }
-        
+    
     func selectSourceFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -200,7 +207,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             return
         }
         
-        guard let source = sourceURL, let vault = vaultURL else {
+        guard let source = sourceURL else {
             log("❌ Error: Select both folders first.")
             return
         }
@@ -210,19 +217,50 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             return
         }
         
-        setupVaultMonitor(for: vault)
+        self.status = .waitingForVault
         
         if !source.startAccessingSecurityScopedResource() {
             log("❌ Failed to access source folder. Check Permissions.")
             return
         }
         
-        NSFileCoordinator.addFilePresenter(self)
-        self.isRunning = true
-        self.status = .active
-        log("👀 Watcher Registered via NSFilePresenter")
-        
-        performInitialScan()
+        Task {
+            let type = PersistenceManager.shared.driveVaultType
+            
+            do {
+                guard let provider = try await VaultFactory.getProvider(type: type) else {
+                    DispatchQueue.main.async {
+                        self.log("❌ Error: Could not initialize Vault Provider. Check Settings.")
+                        self.status = .disabled
+                    }
+                    return
+                }
+                
+                self.vaultProvider = provider
+                
+                DispatchQueue.main.async {
+                    if type == .local, let localURL = self.vaultURL {
+                        self.setupVaultMonitor(for: localURL)
+                    } else {
+                        self.vaultMonitor?.stop()
+                        self.vaultMonitor = nil
+                    }
+                    
+                    NSFileCoordinator.addFilePresenter(self)
+                    self.isRunning = true
+                    self.status = .active
+                    self.log("👀 Watcher Active (\(type == .s3 ? "Cloud Mode" : "Local Mode"))")
+                    
+                    self.performInitialScan()
+                }
+                
+            } catch {
+                DispatchQueue.main.async {
+                    self.log("❌ Failed to create Vault connection: \(error.localizedDescription)")
+                    self.status = .disabled
+                }
+            }
+        }
     }
     
     private func setupVaultMonitor(for url: URL) {
@@ -383,7 +421,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         let filePath = url.path
         let sourcePath = source.path
         if !filePath.hasPrefix(sourcePath) { return nil }
-        let relativePath = String(filePath.dropFirst(sourcePath.count))
+        var relativePath = String(filePath.dropFirst(sourcePath.count))
+        while relativePath.hasPrefix("/") {
+            relativePath.removeFirst()
+        }
         
         let keys: Set<URLResourceKey> = [.generationIdentifierKey]
         
@@ -420,38 +461,29 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func copyToVault(fileURL: URL, relativePath: String, genID: String) {
-        guard let vault = vaultURL else { return }
+        guard let provider = vaultProvider else { return }
         
-        let destinationPath = vault.path + relativePath
-        let destURL = URL(fileURLWithPath: destinationPath)
-        
-        do {
-            try FileManager.default.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            
-            if FileManager.default.fileExists(atPath: destinationPath) {
-                try FileManager.default.removeItem(at: destURL)
-            }
-            
-            try FileManager.default.copyItem(at: fileURL, to: destURL)
-            
-            ledger.markAsProcessed(relativePath: relativePath, genID: genID)
-            
-            DispatchQueue.main.async {
-                self.sessionVaultedCount += 1
-                self.lastSyncTime = Date()
-                self.status = .vaulted(filename: fileURL.lastPathComponent)
-            }
-            log("✅ Vaulted: \(fileURL.lastPathComponent)")
-            
-        } catch {
-            log("⚠️ Copy Failed: \(error.localizedDescription)")
-            
-            if (error as NSError).domain == NSCocoaErrorDomain {
-                NotificationManager.shared.send(
-                    title: "Drive Vault Error",
-                    body: "Failed to copy file. Check if your Vault drive is connected.",
-                    type: .vaultIssue
-                )
+        Task {
+            do {
+                try await provider.saveFile(source: fileURL, relativePath: relativePath)
+                
+                ledger.markAsProcessed(relativePath: relativePath, genID: genID)
+                
+                DispatchQueue.main.async {
+                    self.sessionVaultedCount += 1
+                    self.lastSyncTime = Date()
+                    self.status = .vaulted(filename: fileURL.lastPathComponent)
+                }
+            } catch {
+                log("⚠️ Upload/Copy Failed: \(error.localizedDescription)")
+                
+                if (error as NSError).domain == NSCocoaErrorDomain {
+                    NotificationManager.shared.send(
+                        title: "Vault Error",
+                        body: "Failed to save file. Check your connection.",
+                        type: .vaultIssue
+                    )
+                }
             }
         }
     }

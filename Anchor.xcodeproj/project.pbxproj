@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D86A9D592F363EFE007C083D /* AWSS3 in Frameworks */ = {isa = PBXBuildFile; productRef = D86A9D582F363EFE007C083D /* AWSS3 */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		D86A9D1E2F33BA26007C083D /* Anchor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anchor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D86A9D592F363EFE007C083D /* AWSS3 in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +83,7 @@
 			);
 			name = Anchor;
 			packageProductDependencies = (
+				D86A9D582F363EFE007C083D /* AWSS3 */,
 			);
 			productName = Anchor;
 			productReference = D86A9D1E2F33BA26007C083D /* Anchor.app */;
@@ -107,6 +113,9 @@
 			);
 			mainGroup = D86A9D152F33BA26007C083D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D86A9D572F363EFE007C083D /* XCRemoteSwiftPackageReference "aws-sdk-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D86A9D1F2F33BA26007C083D /* Products */;
 			projectDirPath = "";
@@ -398,6 +407,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D86A9D572F363EFE007C083D /* XCRemoteSwiftPackageReference "aws-sdk-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/awslabs/aws-sdk-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.6.49;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D86A9D582F363EFE007C083D /* AWSS3 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D86A9D572F363EFE007C083D /* XCRemoteSwiftPackageReference "aws-sdk-swift" */;
+			productName = AWSS3;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = D86A9D162F33BA26007C083D /* Project object */;
 }

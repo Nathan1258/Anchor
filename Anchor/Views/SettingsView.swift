@@ -4,10 +4,10 @@
 //
 //  Created by Nathan Ellis on 04/02/2026.
 //
+
 import SwiftUI
 
 struct SettingsView: View {
-    
     @EnvironmentObject var driveWatcher: DriveWatcher
     @EnvironmentObject var photoWatcher: PhotoWatcher
     
@@ -15,8 +15,13 @@ struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     @ObservedObject var exclusionManager = ExclusionManager.shared
     
-    @State private var newExtension: String = ""
-    @State private var newFolder: String = ""
+    @State private var newExtension = ""
+    @State private var newFolder = ""
+    @State private var tempS3Config = PersistenceManager.shared.s3Config
+    
+    @State private var isTestingConnection = false
+    @State private var connectionTestMessage: String? = nil
+    @State private var connectionTestSuccess: Bool = false
     
     var backupDescription: String {
         switch persistence.backupMode {
@@ -31,228 +36,376 @@ struct SettingsView: View {
     
     var body: some View {
         TabView {
-            // MARK: - General Tab
-            Form {
-                Section {
-                    Toggle("Launch at Login", isOn: $settings.launchAtLogin)
-                        .toggleStyle(.switch)
-                    Text("Automatically start Anchor when you log in.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .tabItem { Label("General", systemImage: "gear")}
-            .tag(0)
-            
-            // MARK: - Drive Tab
-            Form {
-                Section {
-                    Toggle("Enable Drive Sync", isOn: $persistence.isDriveEnabled)
-                        .toggleStyle(.switch)
-                }
-                
-                Group {
-                    Section(header: Text("Configuration")) {
-                        PathPickerRow(
-                            label: "Source Folder",
-                            path: driveWatcher.sourceURL,
-                            icon: "icloud",
-                            action: driveWatcher.selectSourceFolder
-                        )
-                        
-                        PathPickerRow(
-                            label: "Vault Folder",
-                            path: driveWatcher.vaultURL,
-                            icon: "externaldrive",
-                            action: driveWatcher.selectVaultFolder
-                        )
-                    }
-                    
-                    Section(
-                        header: Text("Backup Strategy"),
-                        footer: Text(backupDescription)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    ) {
-                        Picker("Mode", selection: $persistence.backupMode) {
-                            Text("Basic").tag(BackupMode.basic)
-                            Text("Mirror").tag(BackupMode.mirror)
-//                            Text("Snapshots").tag(BackupMode.snapshot)
-                        }
-                        .pickerStyle(.segmented)
-                        
-                        if persistence.backupMode == .snapshot {
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack {
-                                    Image(systemName: "clock.arrow.circlepath")
-                                        .font(.title2)
-                                        .foregroundColor(.blue)
-                                    VStack(alignment: .leading) {
-                                        Text("Time Machine Style")
-                                            .font(.headline)
-                                        Text("Creates browsable history folders using space-saving hard links.")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                .padding(.vertical, 4)
-                                
-                                Divider()
-                                
-                                Picker("Snapshot Frequency", selection: $persistence.snapshotFrequency) {
-                                    Text("Every 15 Minutes").tag(15)
-                                    Text("Hourly").tag(60)
-                                    Text("Daily").tag(1440)
-                                }
-                                
-                                Toggle("Auto-Prune Old Snapshots", isOn: $persistence.autoPrune)
-                                if persistence.autoPrune {
-                                    Text("Keeps hourly backups for 24h, daily for a month, then weekly.")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    .onChange(of: persistence.backupMode){ oldValue, newValue in
-                        if newValue == BackupMode.mirror{
-                            // Show alert asking if the user wants to delete files already deleted in iCloud or not
-                        }
-                    }
-                    
-                    Section(
-                        header: Text("Exclusions"),
-                        footer:
-                            Text("Anchor has default exclusions built in")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    ){
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Ignored File Names").font(.caption).fontWeight(.bold).foregroundColor(.secondary)
-                            if !exclusionManager.userIgnoredExtensions.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack {
-                                        ForEach(exclusionManager.userIgnoredExtensions, id: \.self) { ext in
-                                            ExclusionToken(label: ".\(ext)") {
-                                                exclusionManager.removeExtension(ext)
-                                            }
-                                        }
-                                    }
-                                }
-                                .frame(height: 26)
-                            } else {
-                                Text("None").font(.caption).foregroundColor(.secondary)
-                            }
-                            
-                            HStack {
-                                TextField("Add extension (e.g. log, tmp)", text: $newExtension)
-                                    .textFieldStyle(.roundedBorder)
-                                    .onSubmit {
-                                        exclusionManager.addExtension(newExtension)
-                                        newExtension = ""
-                                    }
-                                Button {
-                                    exclusionManager.addExtension(newExtension)
-                                    newExtension = ""
-                                } label: {
-                                    Image(systemName: "plus")
-                                }
-                                .disabled(newExtension.isEmpty)
-                            }
-                            
-                        }
-                        .padding(.vertical, 4)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Ignored Folder Names").font(.caption).fontWeight(.bold).foregroundColor(.secondary)
-                            if !exclusionManager.userIgnoredFolderNames.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack {
-                                        ForEach(exclusionManager.userIgnoredFolderNames, id: \.self) { name in
-                                            ExclusionToken(label: name) {
-                                                exclusionManager.removeFolder(name)
-                                            }
-                                        }
-                                    }
-                                }
-                                .frame(height: 26)
-                            } else {
-                                Text("None").font(.caption).foregroundColor(.secondary)
-                            }
-                            
-                            HStack {
-                                TextField("Add folder name (e.g. build)", text: $newFolder)
-                                    .textFieldStyle(.roundedBorder)
-                                    .onSubmit {
-                                        exclusionManager.addFolder(newFolder)
-                                        newFolder = ""
-                                    }
-                                Button {
-                                    exclusionManager.addFolder(newFolder)
-                                    newFolder = ""
-                                } label: {
-                                    Image(systemName: "plus")
-                                }
-                                .disabled(newFolder.isEmpty)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-                .disabled(!persistence.isDriveEnabled)
-            }
-            .tabItem { Label("Drive", systemImage: "icloud.and.arrow.down")}
-            .tag(1)
-            
-            // MARK: - Photos Tab
-            Form {
-                Section {
-                    Toggle("Enable Photo Backup", isOn: $persistence.isPhotosEnabled)
-                        .toggleStyle(.switch)
-                }
-                
-                Group {
-                    Section(header: Text("Backup Location")) {
-                        PathPickerRow(
-                            label: "Photo Vault",
-                            path: photoWatcher.vaultURL,
-                            icon: "photo.on.rectangle",
-                            action: photoWatcher.selectVaultFolder
-                        )
-                        Text("Anchor will organize photos by Year/Month automatically.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .disabled(!persistence.isPhotosEnabled)
-            }
-            .tabItem { Label("Photos", systemImage: "photo")}
-            .tag(2)
-            
-            // MARK: - Notifications Tab
-            Form {
-                Section(header: Text("Triggers")) {
-                    Toggle("Notify when Backup Complete", isOn: $persistence.notifyBackupComplete)
-                    Toggle("Notify on Vault Issues", isOn: $persistence.notifyVaultIssue)
-                }
-            }
-            .tabItem { Label("Notifications", systemImage: "bell.badge") }
-            .tag(3)
+            generalTab
+            cloudTab
+            driveTab
+            photosTab
+            notificationsTab
         }
         .formStyle(.grouped)
-        .frame(width: 600, height: 400)
-        .onChange(of: persistence.notifyBackupComplete){
-            if persistence.notifyBackupComplete{
+        .frame(width: 800, height: 400)
+        .onChange(of: persistence.notifyBackupComplete) {
+            if persistence.notifyBackupComplete {
                 NotificationManager.shared.requestPermissions()
             }
         }
-        .onChange(of: persistence.notifyVaultIssue){
-            if persistence.notifyVaultIssue{
+        .onChange(of: persistence.notifyVaultIssue) {
+            if persistence.notifyVaultIssue {
                 NotificationManager.shared.requestPermissions()
             }
         }
     }
+    
+    // MARK: - General Tab
+    
+    private var generalTab: some View {
+        Form {
+            Section {
+                Toggle("Launch at Login", isOn: $settings.launchAtLogin)
+                    .toggleStyle(.switch)
+                Text("Automatically start Anchor when you log in.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .tabItem { Label("General", systemImage: "gear") }
+        .tag(0)
+    }
+    
+    // MARK: - Cloud Tab
+    private var cloudTab: some View {
+        Form {
+            Section(header: Text("S3 / Object Storage Credentials")) {
+                TextField("Endpoint URL", text: $tempS3Config.endpoint)
+                    .autocorrectionDisabled()
+                TextField("Region", text: $tempS3Config.region)
+                    .autocorrectionDisabled()
+                TextField("Bucket Name", text: $tempS3Config.bucket)
+                    .autocorrectionDisabled()
+            }
+            
+            Section(header: Text("Authentication")) {
+                TextField("Access Key ID", text: $tempS3Config.accessKey)
+                    .autocorrectionDisabled()
+                SecureField("Secret Access Key", text: $tempS3Config.secretKey)
+                    .textContentType(.password)
+            }
+            
+            Section {
+                HStack {
+                    Button("Save Credentials") {
+                        persistence.s3Config = tempS3Config
+                        connectionTestMessage = nil
+                    }
+                    .disabled(tempS3Config == persistence.s3Config)
+                    
+                    Spacer()
+                    
+                    Button(action: testConnection) {
+                        if isTestingConnection {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Test Connection")
+                        }
+                    }
+                    .disabled(!tempS3Config.isValid || isTestingConnection)
+                }
+                
+                if let message = connectionTestMessage {
+                    HStack {
+                        Image(systemName: connectionTestSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(connectionTestSuccess ? .green : .red)
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(connectionTestSuccess ? .green : .red)
+                    }
+                }
+            }
+        }
+        .tabItem { Label("Cloud", systemImage: "network") }
+        .tag(1)
+    }
+    
+    // MARK: - Drive Tab
+    
+    private var driveTab: some View {
+        Form {
+            Section {
+                Toggle("Enable Drive Sync", isOn: $persistence.isDriveEnabled)
+                    .toggleStyle(.switch)
+            }
+            
+            Group {
+                driveSourceSection
+                driveDestinationSection
+                driveBackupStrategySection
+                driveExclusionsSection
+            }
+            .disabled(!persistence.isDriveEnabled)
+        }
+        .tabItem { Label("Drive", systemImage: "icloud.and.arrow.down") }
+        .tag(2)
+    }
+    
+    private var driveSourceSection: some View {
+        Section(header: Text("Source")) {
+            PathPickerRow(
+                label: "Source Folder",
+                path: driveWatcher.sourceURL,
+                icon: "icloud",
+                action: driveWatcher.selectSourceFolder
+            )
+        }
+    }
+    
+    private var driveDestinationSection: some View {
+        Section(header: Text("Destination")) {
+            Picker("Vault Type", selection: $persistence.driveVaultType) {
+                ForEach(VaultType.allCases) { type in
+                    Text(type.rawValue).tag(type)
+                }
+            }
+            .pickerStyle(.segmented)
+            
+            if persistence.driveVaultType == .local {
+                PathPickerRow(
+                    label: "Local Vault Folder",
+                    path: driveWatcher.vaultURL,
+                    icon: "externaldrive",
+                    action: driveWatcher.selectVaultFolder
+                )
+            } else {
+                S3StatusRow(config: persistence.s3Config)
+            }
+        }
+    }
+    
+    private var driveBackupStrategySection: some View {
+        Section(
+            header: Text("Backup Strategy"),
+            footer: Text(backupDescription)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        ) {
+            Picker("Mode", selection: $persistence.backupMode) {
+                Text("Basic").tag(BackupMode.basic)
+                Text("Mirror").tag(BackupMode.mirror)
+//                Text("Snapshots").tag(BackupMode.snapshot)
+            }
+            .pickerStyle(.segmented)
+            
+            if persistence.backupMode == .snapshot {
+                snapshotConfiguration
+            }
+        }
+        .onChange(of: persistence.backupMode) { oldValue, newValue in
+            if newValue == .mirror {
+                // Show alert asking if the user wants to delete files already deleted in iCloud or not
+            }
+        }
+    }
+    
+    private var snapshotConfiguration: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading) {
+                    Text("Time Machine Style")
+                        .font(.headline)
+                    Text("Creates browsable history folders using space-saving hard links.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.vertical, 4)
+            
+            Divider()
+            
+            Picker("Snapshot Frequency", selection: $persistence.snapshotFrequency) {
+                Text("Every 15 Minutes").tag(15)
+                Text("Hourly").tag(60)
+                Text("Daily").tag(1440)
+            }
+            
+            Toggle("Auto-Prune Old Snapshots", isOn: $persistence.autoPrune)
+            
+            if persistence.autoPrune {
+                Text("Keeps hourly backups for 24h, daily for a month, then weekly.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+    
+    private var driveExclusionsSection: some View {
+        Section(
+            header: Text("Exclusions"),
+            footer: Text("Anchor has default exclusions built in")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        ) {
+            exclusionFileNames
+            exclusionFolderNames
+        }
+    }
+    
+    private var exclusionFileNames: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Ignored File Names")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+            
+            if !exclusionManager.userIgnoredExtensions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(exclusionManager.userIgnoredExtensions, id: \.self) { ext in
+                            ExclusionToken(label: ".\(ext)") {
+                                exclusionManager.removeExtension(ext)
+                            }
+                        }
+                    }
+                }
+                .frame(height: 26)
+            } else {
+                Text("None")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            HStack {
+                TextField("Add extension (e.g. log, tmp)", text: $newExtension)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        exclusionManager.addExtension(newExtension)
+                        newExtension = ""
+                    }
+                Button {
+                    exclusionManager.addExtension(newExtension)
+                    newExtension = ""
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .disabled(newExtension.isEmpty)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
+    private var exclusionFolderNames: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Ignored Folder Names")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+            
+            if !exclusionManager.userIgnoredFolderNames.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(exclusionManager.userIgnoredFolderNames, id: \.self) { name in
+                            ExclusionToken(label: name) {
+                                exclusionManager.removeFolder(name)
+                            }
+                        }
+                    }
+                }
+                .frame(height: 26)
+            } else {
+                Text("None")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            HStack {
+                TextField("Add folder name (e.g. build)", text: $newFolder)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        exclusionManager.addFolder(newFolder)
+                        newFolder = ""
+                    }
+                Button {
+                    exclusionManager.addFolder(newFolder)
+                    newFolder = ""
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .disabled(newFolder.isEmpty)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
+    // MARK: - Photos Tab
+    
+    private var photosTab: some View {
+        Form {
+            Section {
+                Toggle("Enable Photo Backup", isOn: $persistence.isPhotosEnabled)
+                    .toggleStyle(.switch)
+            }
+            
+            Group {
+                Section(header: Text("Backup Location")) {
+                    PathPickerRow(
+                        label: "Photo Vault",
+                        path: photoWatcher.vaultURL,
+                        icon: "photo.on.rectangle",
+                        action: photoWatcher.selectVaultFolder
+                    )
+                    Text("Anchor will organize photos by Year/Month automatically.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .disabled(!persistence.isPhotosEnabled)
+        }
+        .tabItem { Label("Photos", systemImage: "photo") }
+        .tag(3)
+    }
+    
+    // MARK: - Notifications Tab
+    
+    private var notificationsTab: some View {
+        Form {
+            Section(header: Text("Triggers")) {
+                Toggle("Notify when Backup Complete", isOn: $persistence.notifyBackupComplete)
+                Toggle("Notify on Vault Issues", isOn: $persistence.notifyVaultIssue)
+            }
+        }
+        .tabItem { Label("Notifications", systemImage: "bell.badge") }
+        .tag(4)
+    }
+    
+    private func testConnection() {
+        guard tempS3Config.isValid else { return }
+        
+        isTestingConnection = true
+        connectionTestMessage = nil
+        
+        Task {
+            do {
+                let tester = try await S3Vault.create(config: tempS3Config)
+                try await tester.testConnection()
+                
+                DispatchQueue.main.async {
+                    self.connectionTestSuccess = true
+                    self.connectionTestMessage = "Connection Successful! Write access confirmed."
+                    self.isTestingConnection = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.connectionTestSuccess = false
+                    self.connectionTestMessage = "Connection Failed: \(error.localizedDescription)"
+                    self.isTestingConnection = false
+                }
+            }
+        }
+    }
 }
+
+// MARK: - Supporting Views
 
 struct ExclusionToken: View {
     let label: String
@@ -279,6 +432,37 @@ struct ExclusionToken: View {
         .overlay(
             Capsule().stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+    }
+}
+
+struct S3StatusRow: View {
+    let config: S3Config
+    
+    var body: some View {
+        HStack {
+            Image(systemName: "server.rack")
+                .frame(width: 20)
+                .foregroundColor(config.isValid ? .green : .orange)
+            
+            VStack(alignment: .leading) {
+                if config.isValid {
+                    Text("Target Bucket: \(config.bucket)")
+                        .fontWeight(.medium)
+                    Text("Region: \(config.region) • Endpoint: \(config.endpoint)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("S3 Not Configured")
+                        .fontWeight(.medium)
+                        .foregroundColor(.orange)
+                    Text("Go to the 'Cloud' tab to set up credentials.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
     }
 }
 

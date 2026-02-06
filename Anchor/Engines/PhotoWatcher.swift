@@ -23,10 +23,10 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     @Published var logs: [String] = []
     
+    private var vaultProvider: VaultProvider?
     private var vaultMonitor: VaultMonitor?
     
     private let exportQueue = DispatchQueue(label: "com.anchor.photoExport", qos: .utility)
-    
     private var cancellables = Set<AnyCancellable>()
     
     override init() {
@@ -48,13 +48,17 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
     
     private func restoreState() {
-        if let source = PersistenceManager.shared.loadBookmark(type: .photoVault) {
+        if PersistenceManager.shared.photoVaultType == .local,
+           let source = PersistenceManager.shared.loadBookmark(type: .photoVault) {
             if source.startAccessingSecurityScopedResource() {
                 self.vaultURL = source
             }
         }
         
-        if vaultURL != nil {
+        let isLocalReady = (PersistenceManager.shared.photoVaultType == .local && vaultURL != nil)
+        let isS3Ready = (PersistenceManager.shared.photoVaultType == .s3 && PersistenceManager.shared.s3Config.isValid)
+        
+        if isLocalReady || isS3Ready {
             log("♻️ Restored previous session. Auto-starting...")
             startWatching()
         }
@@ -69,6 +73,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         panel.begin { response in
             if response == .OK, let url = panel.url {
                 self.vaultURL = url
+                PersistenceManager.shared.photoVaultType = .local
                 PersistenceManager.shared.saveBookmark(for: url, type: .photoVault)
                 self.log("📸 Photo Vault set to: \(url.path)")
             }
@@ -88,13 +93,48 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             return
         }
         
-        guard let vault = vaultURL else {
+        if PersistenceManager.shared.photoVaultType == .local && vaultURL == nil {
             log("⚠️ Select a Vault folder first.")
             return
         }
         
-        setupVaultMonitor(for: vault)
+        self.status = .waitingForVault
         
+        Task {
+            let type = PersistenceManager.shared.photoVaultType
+            
+            do {
+                guard let provider = try await VaultFactory.getProvider(type: type) else {
+                    DispatchQueue.main.async {
+                        self.log("❌ Error: Could not initialize Photo Vault Provider.")
+                        self.status = .disabled
+                    }
+                    return
+                }
+                
+                self.vaultProvider = provider
+                
+                DispatchQueue.main.async {
+                    if type == .local, let localURL = self.vaultURL {
+                        self.setupVaultMonitor(for: localURL)
+                    } else {
+                        self.vaultMonitor?.stop()
+                        self.vaultMonitor = nil
+                    }
+                    
+                    self.requestPhotoAccess()
+                }
+                
+            } catch {
+                DispatchQueue.main.async {
+                    self.log("❌ Connection Error: \(error.localizedDescription)")
+                    self.status = .disabled
+                }
+            }
+        }
+    }
+    
+    private func requestPhotoAccess() {
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
             DispatchQueue.main.async {
                 if status == .authorized || status == .limited {
@@ -322,7 +362,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     private func exportAsset(_ asset: PHAsset, forceOverwrite: Bool = false) {
-        guard let vault = vaultURL else { return }
+        guard let provider = vaultProvider else { return }
         
         DispatchQueue.main.async { self.lastPhotoProcessed = "Processing..." }
         
@@ -331,39 +371,47 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let year = String(calendar.component(.year, from: date))
         let month = String(format: "%02d", calendar.component(.month, from: date))
         
-        let folderURL = vault.appendingPathComponent(year).appendingPathComponent(month)
-        
-        do {
-            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-        } catch { return }
-        
         let resources = PHAssetResource.assetResources(for: asset)
         
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        
         let group = DispatchGroup()
-        let errors: [String] = []
-        var savedFilenames: [String] = []
+        
+        actor ResultsCollector {
+            var errors: [String] = []
+            var savedFilenames: [String] = []
+            
+            func addError(_ error: String) {
+                errors.append(error)
+            }
+            
+            func addSavedFile(_ filename: String) {
+                savedFilenames.append(filename)
+            }
+            
+            func getResults() -> (errors: [String], savedFilenames: [String]) {
+                return (errors, savedFilenames)
+            }
+        }
+        
+        let collector = ResultsCollector()
         
         for resource in resources {
             group.enter()
             
             let filename = resource.originalFilename
-            let destinationURL = folderURL.appendingPathComponent(filename)
-            
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                if forceOverwrite {
-                    try? FileManager.default.removeItem(at: destinationURL)
-                } else {
-                    group.leave()
-                    continue
-                }
-            }
+            let relativePath = "\(year)/\(month)/\(filename)"
+            let tempFileURL = tempDir.appendingPathComponent(filename)
             
             let options = PHAssetResourceRequestOptions()
             options.isNetworkAccessAllowed = true
             
-            PHAssetResourceManager.default().writeData(for: resource, toFile: destinationURL, options: options) { error in
+            PHAssetResourceManager.default().writeData(for: resource, toFile: tempFileURL, options: options) { error in
                 if let error {
-                    self.log("⚠️ Failed: \(filename) - \(error.localizedDescription)")
+                    Task { @MainActor in
+                        self.log("⚠️ Failed: \(filename) - \(error.localizedDescription)")
+                    }
                     
                     if (error as NSError).domain == NSCocoaErrorDomain && (error as NSError).code == 4 {
                         NotificationManager.shared.send(
@@ -372,26 +420,50 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             type: .vaultIssue
                         )
                     }
-                } else {
-                    savedFilenames.append(filename)
+                    group.leave()
+                    return
                 }
-                group.leave()
+                
+                Task {
+                    do {
+                        let exists = await provider.fileExists(relativePath: relativePath)
+                        
+                        if !exists {
+                            try await provider.saveFile(source: tempFileURL, relativePath: relativePath)
+                            await collector.addSavedFile(filename)
+                        }
+                        
+                        try? FileManager.default.removeItem(at: tempFileURL)
+                        
+                    } catch {
+                        await Task { @MainActor in
+                            self.log("⚠️ Upload Failed: \(filename) - \(error.localizedDescription)")
+                        }.value
+                    }
+                    group.leave()
+                }
             }
         }
         
         group.notify(queue: .main) {
-            if !savedFilenames.isEmpty {
-                self.sessionSavedCount += 1
-                self.lastSyncTime = Date()
-                
-                if let primeFile = savedFilenames.first {
-                    self.lastPhotoProcessed = primeFile
-                    self.log(forceOverwrite ? "♻️ Updated: \(primeFile)" : "✅ Saved: \(primeFile) (+ components)")
-                }
-            }
+            try? FileManager.default.removeItem(at: tempDir)
             
-            if !errors.isEmpty {
-                self.log("⚠️ Issues saving asset components: \(errors.joined(separator: ", "))")
+            Task { @MainActor in
+                let results = await collector.getResults()
+                
+                if !results.savedFilenames.isEmpty {
+                    self.sessionSavedCount += 1
+                    self.lastSyncTime = Date()
+                    
+                    if let primeFile = results.savedFilenames.first {
+                        self.lastPhotoProcessed = primeFile
+                        self.log(forceOverwrite ? "♻️ Updated: \(primeFile)" : "✅ Saved: \(primeFile) (+ components)")
+                    }
+                }
+                
+                if !results.errors.isEmpty {
+                    self.log("⚠️ Issues saving asset components: \(results.errors.joined(separator: ", "))")
+                }
             }
         }
     }

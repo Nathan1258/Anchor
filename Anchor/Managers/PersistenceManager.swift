@@ -13,6 +13,10 @@ class PersistenceManager: ObservableObject {
     
     private let defaults = UserDefaults.standard
     
+    private let kDriveVaultType = "anchor_drive_vault_type"
+    private let kPhotoVaultType = "anchor_photo_vault_type"
+    private let kS3Config = "anchor_s3_config"
+    
     private let kSourceBookmark = "anchor_source_bookmark"
     private let kVaultBookmark = "anchor_vault_bookmark"
     private let kPhotoVaultBookmark = "anchor_photo_vault_bookmark"
@@ -52,6 +56,44 @@ class PersistenceManager: ObservableObject {
         set {
             objectWillChange.send()
             defaults.set(newValue, forKey: kSnapshotFrequency)
+        }
+    }
+    
+    var driveVaultType: VaultType {
+        get {
+            guard let raw = defaults.string(forKey: kDriveVaultType) else { return .local }
+            return VaultType(rawValue: raw) ?? .local
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue.rawValue, forKey: kDriveVaultType)
+        }
+    }
+    
+    var photoVaultType: VaultType {
+        get {
+            guard let raw = defaults.string(forKey: kPhotoVaultType) else { return .local }
+            return VaultType(rawValue: raw) ?? .local
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue.rawValue, forKey: kPhotoVaultType)
+        }
+    }
+    
+    var s3Config: S3Config {
+        get {
+            guard let data = defaults.data(forKey: kS3Config),
+                  let config = try? JSONDecoder().decode(S3Config.self, from: data) else {
+                return S3Config()
+            }
+            return config
+        }
+        set {
+            objectWillChange.send()
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: kS3Config)
+            }
         }
     }
     

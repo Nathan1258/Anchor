@@ -41,6 +41,15 @@ struct SettingsView: View {
     @State private var pendingVaultTypeForCheck: VaultType?
     @State private var pendingVaultURLForCheck: URL?
     
+    @State private var showDriveWipeAlert = false
+    @State private var showPhotosWipeAlert = false
+    @State private var isWiping = false
+    
+    @State private var showDriveEnableAlert = false
+    @State private var showPhotosEnableAlert = false
+    
+    @State private var pendingEnableType: PendingEnableType?
+    
     var backupDescription: String {
         switch persistence.backupMode {
         case .basic:
@@ -72,14 +81,12 @@ struct SettingsView: View {
                 NotificationManager.shared.requestPermissions()
             }
         }
-        .sheet(isPresented: $showEncryptionSheet) {
-            if let mode = encryptionMode {
-                EncryptionPasswordSheet(mode: mode) { success in
-                    if success {
-                        finalizeVaultSetup()
-                    } else {
-                        pendingVaultProvider = nil
-                    }
+        .sheet(item: $encryptionMode) { mode in
+            EncryptionPasswordSheet(mode: mode) { success in
+                if success {
+                    finalizeVaultSetup()
+                } else {
+                    pendingVaultProvider = nil
                 }
             }
         }
@@ -102,6 +109,29 @@ struct SettingsView: View {
                 Toggle("Launch at Login", isOn: $settings.launchAtLogin)
                     .toggleStyle(.switch)
                 Text("Automatically start Anchor when you log in.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Section(header: Text("Troubleshooting")) {
+                HStack {
+                    Button("Rebuild Restore Index") {
+                        ReIndexManager.shared.rebuildIndex(type: persistence.driveVaultType)
+                    }
+                    .disabled(ReIndexManager.shared.isIndexing)
+                    
+                    if ReIndexManager.shared.isIndexing {
+                        ProgressView().controlSize(.small)
+                        Text(ReIndexManager.shared.statusMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if !ReIndexManager.shared.statusMessage.isEmpty {
+                        Text(ReIndexManager.shared.statusMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Text("Use this if your Restore Browser is empty or missing files.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -168,7 +198,18 @@ struct SettingsView: View {
     private var driveTab: some View {
         Form {
             Section {
-                Toggle("Enable Drive Sync", isOn: $persistence.isDriveEnabled)
+                let driveBinding = Binding<Bool>(
+                    get: { persistence.isDriveEnabled },
+                    set: { newValue in
+                        if newValue {
+                            attemptToEnable(type: .drive)
+                        } else {
+                            showDriveWipeAlert = true
+                        }
+                    }
+                )
+                
+                Toggle("Enable Drive Sync", isOn: driveBinding)
                     .toggleStyle(.switch)
             }
             
@@ -182,6 +223,33 @@ struct SettingsView: View {
         }
         .tabItem { Label("Drive", systemImage: "icloud.and.arrow.down") }
         .tag(2)
+        .alert("Enable Drive Sync?", isPresented: $showDriveEnableAlert) {
+            Button("Cancel", role: .cancel) {}
+            
+            Button("Upload All") {
+                enableDrive(uploadAll: true)
+            }
+            
+            Button("Only New Files") {
+                enableDrive(uploadAll: false)
+            }
+        } message: {
+            Text("Do you want to back up all existing files in this folder, or only new files created from now on?")
+        }
+        .alert("Disable Drive Sync?", isPresented: $showDriveWipeAlert) {
+            Button("Cancel", role: .cancel) {}
+            
+            Button("Keep Files") {
+                disableDrive(wipe: false)
+            }
+            
+            Button("Delete Backup", role: .destructive) {
+                disableDrive(wipe: true)
+            }
+        } message: {
+            Text("Do you want to keep the files currently in your Vault, or delete them?")
+        }
+        .disabled(isWiping)
     }
     
     private var driveSourceSection: some View {
@@ -428,17 +496,9 @@ struct SettingsView: View {
                     get: { persistence.isPhotosEnabled },
                     set: { newValue in
                         if newValue {
-                            if persistence.loadPhotoToken() == nil {
-                                showPhotoImportChoice = true
-                            } else {
-                                persistence.isPhotosEnabled = true
-                                photoWatcher.startWatching()
-                            }
+                            photoWatcher.startWatching()
                         } else {
-                            // Turning OFF
-                            persistence.isPhotosEnabled = false
-                            photoWatcher.isRunning = false
-                            photoWatcher.status = .disabled
+                            showPhotosWipeAlert = true
                         }
                     }
                 )
@@ -446,6 +506,7 @@ struct SettingsView: View {
                 Toggle("Enable Photo Backup", isOn: photosBinding)
                     .toggleStyle(.switch)
             }
+            .disabled(isWiping)
             
             Group {
                 Section(header: Text("Destination")) {
@@ -502,6 +563,32 @@ struct SettingsView: View {
         }
         .tabItem { Label("Photos", systemImage: "photo") }
         .tag(3)
+        .alert("Enable Photo Backup?", isPresented: $showPhotosEnableAlert) {
+            Button("Cancel", role: .cancel) { }
+            
+            Button("Upload Entire Library") {
+                enablePhotos(uploadAll: true)
+            }
+            
+            Button("Only New Photos") {
+                enablePhotos(uploadAll: false)
+            }
+        } message: {
+            Text("Do you want Anchor to back up your entire existing library, or only new photos taken from now on?")
+        }
+        .alert("Disable Photo Backup?", isPresented: $showPhotosWipeAlert) {
+            Button("Cancel", role: .cancel) { }
+            
+            Button("Keep Files") {
+                disablePhotos(wipe: false)
+            }
+            
+            Button("Delete Backup", role: .destructive) {
+                disablePhotos(wipe: true)
+            }
+        } message: {
+            Text("Do you want to keep the photos currently in your Vault, or delete them?")
+        }
         .alert("Switch Photo Vault?", isPresented: $showPhotoVaultSwitchAlert) {
             
             Button("Switch & Upload All") {
@@ -629,12 +716,16 @@ struct SettingsView: View {
                 self.pendingVaultURLForCheck = url
                 
                 if let id = identity {
-                    self.encryptionMode = .unlock(id)
+                    if CryptoManager.shared.isConfigured {
+                        finalizeVaultSetup()
+                    } else {
+                        self.encryptionMode = .unlock(id)
+                        self.showEncryptionSheet = true
+                    }
                 } else {
                     self.encryptionMode = .setup(nil)
+                    self.showEncryptionSheet = true
                 }
-                
-                self.showEncryptionSheet = true
             }
         } catch {
             print("Error checking vault identity: \(error)")
@@ -646,113 +737,219 @@ struct SettingsView: View {
         
         if type == .s3 {
             persistence.s3Config = tempS3Config
-            persistence.driveVaultType = .s3
+            if pendingEnableType == .drive { persistence.driveVaultType = .s3 }
+            if pendingEnableType == .photos { persistence.photoVaultType = .s3 }
         } else if type == .local, let url = pendingVaultURLForCheck {
-            persistence.driveVaultType = .local
-            driveWatcher.vaultURL = url
-            persistence.saveBookmark(for: url, type: .driveVault)
+            if pendingEnableType == .drive {
+                persistence.driveVaultType = .local
+                driveWatcher.vaultURL = url
+                persistence.saveBookmark(for: url, type: .driveVault)
+            }
+            if pendingEnableType == .photos {
+                persistence.photoVaultType = .local
+                photoWatcher.vaultURL = url
+                persistence.saveBookmark(for: url, type: .photoVault)
+            }
         }
         
-        driveWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck)
+        if pendingEnableType == .drive || pendingEnableType == nil {
+            driveWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck)
+        }
+        if pendingEnableType == .photos {
+            photoWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck, importHistory: true)
+        }
+        
+        if let pending = pendingEnableType {
+            proceedToStrategy(type: pending)
+            pendingEnableType = nil
+        }
         
         pendingVaultProvider = nil
         pendingVaultTypeForCheck = nil
         pendingVaultURLForCheck = nil
     }
-}
-
-// MARK: - Supporting Views
-
-struct ExclusionToken: View {
-    let label: String
-    let onDelete: () -> Void
     
-    @State private var isHovering = false
-    
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.primary)
-            
-            Button(action: onDelete) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-            }
-            .buttonStyle(.borderless)
-            .foregroundColor(.secondary)
+    func enableDrive(uploadAll: Bool) {
+        persistence.isDriveEnabled = true
+        
+        driveWatcher.isRunning = true
+        driveWatcher.status = .active
+        
+        if uploadAll {
+            driveWatcher.startWatching()
+        } else {
+            driveWatcher.markEverythingAsSynced()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(
-            Capsule().stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-        )
     }
-}
-
-struct S3StatusRow: View {
-    let config: S3Config
     
-    var body: some View {
-        HStack {
-            Image(systemName: "server.rack")
-                .frame(width: 20)
-                .foregroundColor(config.isValid ? .green : .orange)
-            
-            VStack(alignment: .leading) {
-                if config.isValid {
-                    Text("Target Bucket: \(config.bucket)")
-                        .fontWeight(.medium)
-                    Text("Region: \(config.region) • Endpoint: \(config.endpoint)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("S3 Not Configured")
-                        .fontWeight(.medium)
-                        .foregroundColor(.orange)
-                    Text("Go to the 'Cloud' tab to set up credentials.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+    func disableDrive(wipe: Bool) {
+        persistence.isDriveEnabled = false
+        driveWatcher.status = .disabled
+        driveWatcher.isRunning = false
+        
+        if wipe {
+            isWiping = true
+            Task {
+                if let provider = try? await VaultFactory.getProvider(type: persistence.driveVaultType) {
+                    let prefix = (persistence.driveVaultType == .s3) ? "drive/" : ""
+                    try? await provider.wipe(prefix: prefix)
                 }
+                
+                SQLiteLedger().wipe()
+                
+                await MainActor.run { isWiping = false }
             }
-            Spacer()
         }
-        .padding(.vertical, 4)
     }
-}
-
-struct PathPickerRow: View {
-    let label: String
-    let path: URL?
-    let icon: String
-    let action: () -> Void
-    var isEncrypted: Bool = false
     
-    var body: some View {
-        HStack {
-            Image(systemName: icon)
-                .frame(width: 20)
-                .foregroundColor(.secondary)
+    func enablePhotos(uploadAll: Bool) {
+        persistence.isPhotosEnabled = true
+        
+        if uploadAll {
+            photoWatcher.startWatching()
+        } else {
+            photoWatcher.markAsUpToDate()
+            photoWatcher.startWatching()
+        }
+    }
+    
+    func disablePhotos(wipe: Bool) {
+        persistence.isPhotosEnabled = false
+        photoWatcher.status = .disabled
+        photoWatcher.isRunning = false
+        persistence.clearPhotoToken()
+        
+        if wipe {
+            isWiping = true
+            Task {
+                if let provider = try? await VaultFactory.getProvider(type: persistence.photoVaultType) {
+                    let prefix = (persistence.photoVaultType == .s3) ? "photos/" : ""
+                    try? await provider.wipe(prefix: prefix)
+                }
+                await MainActor.run { isWiping = false }
+            }
+        }
+    }
+    
+    func attemptToEnable(type: PendingEnableType) {
+        Task {
+            let vaultType = (type == .drive) ? persistence.driveVaultType : persistence.photoVaultType
             
-            VStack(alignment: .leading) {
+            guard let provider = try? await VaultFactory.getProvider(type: vaultType) else {
+                // show an error alert here.
+                return
+            }
+            
+            await MainActor.run {
+                self.pendingEnableType = type
+                Task { await processVaultHandshake(provider: provider, type: vaultType, url: nil) }
+            }
+        }
+    }
+    
+    func proceedToStrategy(type: PendingEnableType) {
+        if type == .drive {
+            showDriveEnableAlert = true
+        } else {
+            if persistence.loadPhotoToken() == nil {
+                showPhotosEnableAlert = true
+            } else {
+                enablePhotos(uploadAll: true)
+            }
+        }
+    }
+        
+    struct ExclusionToken: View {
+        let label: String
+        let onDelete: () -> Void
+        
+        @State private var isHovering = false
+        
+        var body: some View {
+            HStack(spacing: 4) {
                 Text(label)
-                    .fontWeight(.medium)
-                if let p = path {
-                    Text("\(p.path) \(isEncrypted ? " - Encryption Enabled" : "")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .truncationMode(.middle)
-                        .lineLimit(1)
-                } else {
-                    Text("Not Set")
-                        .font(.caption)
-                        .foregroundColor(.red)
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
                 }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
             }
-            Spacer()
-            Button("Select...", action: action)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(
+                Capsule().stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            )
         }
-        .padding(.vertical, 4)
+    }
+    
+    struct S3StatusRow: View {
+        let config: S3Config
+        
+        var body: some View {
+            HStack {
+                Image(systemName: "server.rack")
+                    .frame(width: 20)
+                    .foregroundColor(config.isValid ? .green : .orange)
+                
+                VStack(alignment: .leading) {
+                    if config.isValid {
+                        Text("Target Bucket: \(config.bucket)")
+                            .fontWeight(.medium)
+                        Text("Region: \(config.region) • Endpoint: \(config.endpoint)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("S3 Not Configured")
+                            .fontWeight(.medium)
+                            .foregroundColor(.orange)
+                        Text("Go to the 'Cloud' tab to set up credentials.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.vertical, 4)
+        }
+    }
+    
+    struct PathPickerRow: View {
+        let label: String
+        let path: URL?
+        let icon: String
+        let action: () -> Void
+        var isEncrypted: Bool = false
+        
+        var body: some View {
+            HStack {
+                Image(systemName: icon)
+                    .frame(width: 20)
+                    .foregroundColor(.secondary)
+                
+                VStack(alignment: .leading) {
+                    Text(label)
+                        .fontWeight(.medium)
+                    if let p = path {
+                        Text("\(p.path) \(isEncrypted ? " - Encryption Enabled" : "")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .truncationMode(.middle)
+                            .lineLimit(1)
+                    } else {
+                        Text("Not Set")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+                Spacer()
+                Button("Select...", action: action)
+            }
+            .padding(.vertical, 4)
+        }
     }
 }

@@ -86,7 +86,7 @@ class PersistenceManager: ObservableObject {
     
     var notifyVaultIssue: Bool {
         get {
-            guard let val = defaults.object(forKey: kNotifyVaultIssue) else { return true }
+            guard defaults.object(forKey: kNotifyVaultIssue) != nil else { return true }
             return defaults.bool(forKey: kNotifyVaultIssue)
         }
         set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyVaultIssue) }

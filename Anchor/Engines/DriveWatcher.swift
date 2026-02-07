@@ -717,7 +717,17 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                                 uploadPath += ".anchor"
                             }
                             
-                            try await provider.saveFile(source: uploadSource, relativePath: uploadPath)
+                            try await provider.saveFile(source: uploadSource, relativePath: uploadPath){ [weak self] in
+                                guard let self = self else { return true }
+                                
+                                if !self.isRunning { return true }
+                                
+                                if !PersistenceManager.shared.isDriveEnabled { return true }
+                                
+                                if PersistenceManager.shared.isGlobalPaused { return true }
+                                
+                                return false
+                            }
                             
                             await self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
                             
@@ -762,6 +772,44 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             
             if let error = coordError {
                 self.log("🔒 Locked File Skipped: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    func markEverythingAsSynced() {
+        guard let source = sourceURL else { return }
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            self.log("🏁 Baseline Scan: Marking existing files as synced (Skipping Upload)...")
+            
+            let fileManager = FileManager.default
+            let keys: [URLResourceKey] = [.generationIdentifierKey, .isDirectoryKey, .isPackageKey]
+            
+            guard let enumerator = fileManager.enumerator(at: source, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { return }
+            
+            var count = 0
+            
+            for case let fileURL as URL in enumerator {
+                if ExclusionManager.shared.shouldIgnore(url: fileURL) { continue }
+                
+                let resourceValues = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+                let isDirectory = resourceValues?.isDirectory ?? false
+                let isPackage = resourceValues?.isPackage ?? false
+                
+                if isDirectory && !isPackage { continue }
+                
+                guard let metadata = self.extractMetadata(for: fileURL) else { continue }
+                
+                self.ledger.markAsProcessed(relativePath: metadata.relativePath, genID: metadata.genID)
+                count += 1
+            }
+            
+            DispatchQueue.main.async {
+                self.log("✅ Baseline Set. Ignored \(count) existing files. Ready for new changes.")
+                self.status = .monitoring
+                self.isRunning = true 
             }
         }
     }

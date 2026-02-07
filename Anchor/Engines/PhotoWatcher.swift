@@ -476,7 +476,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         
         let collector = ResultsCollector()
-        let activity = ProcessInfo.processInfo.beginActivity(
+        let _ = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .idleSystemSleepDisabled],
             reason: "Exporting Photo"
         )
@@ -526,7 +526,17 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         let exists = await provider.fileExists(relativePath: finalRelativePath)
                         
                         if !exists {
-                            try await provider.saveFile(source: finalSource, relativePath: finalRelativePath)
+                            try await provider.saveFile(source: finalSource, relativePath: finalRelativePath){ [weak self] in
+                                guard let self = self else { return true }
+                                
+                                if !self.isRunning { return true }
+                                
+                                if !PersistenceManager.shared.isDriveEnabled { return true }
+                                
+                                if PersistenceManager.shared.isGlobalPaused { return true }
+                                
+                                return false
+                            }
                             await collector.addSavedFile(filename)
                         }
                         

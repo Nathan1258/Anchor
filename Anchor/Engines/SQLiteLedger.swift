@@ -7,10 +7,13 @@
 import Foundation
 import SQLite3
 
-class SQLiteLedger {
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+class SQLiteLedger: @unchecked Sendable {
     private var db: OpaquePointer?
+    // Serial queue for writes to prevent locking, concurrent for reads
     private let queue = DispatchQueue(label: "com.anchor.sqlite", attributes: .concurrent)
-    
+        
     init() {
         let fileURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
@@ -34,23 +37,15 @@ class SQLiteLedger {
     }
     
     private func openDatabase(at url: URL) -> Bool {
-        if sqlite3_open(url.path, &db) != SQLITE_OK {
-            return false
-        }
+        if sqlite3_open(url.path, &db) != SQLITE_OK { return false }
         
-        var statement: OpaquePointer?
-        if sqlite3_prepare_v2(db, "PRAGMA quick_check;", -1, &statement, nil) == SQLITE_OK {
-            let stepResult = sqlite3_step(statement)
-            sqlite3_finalize(statement)
-            
-            if stepResult == SQLITE_ROW {
-                return sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nil, nil, nil) == SQLITE_OK
-            }
-        }
+        sqlite3_busy_timeout(db, 5000)
         
-        sqlite3_close(db)
-        db = nil
-        return false
+        _ = execute(sql: "PRAGMA journal_mode=WAL;")
+        
+        _ = execute(sql: "PRAGMA synchronous=NORMAL;")
+        
+        return true
     }
     
     func renamePath(from oldPath: String, to newPath: String) {
@@ -58,8 +53,8 @@ class SQLiteLedger {
             let exactQuery = "UPDATE files SET path = ? WHERE path = ?;"
             var stmt1: OpaquePointer?
             if sqlite3_prepare_v2(self.db, exactQuery, -1, &stmt1, nil) == SQLITE_OK {
-                sqlite3_bind_text(stmt1, 1, (newPath as NSString).utf8String, -1, nil)
-                sqlite3_bind_text(stmt1, 2, (oldPath as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(stmt1, 1, (newPath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt1, 2, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_step(stmt1)
             }
             sqlite3_finalize(stmt1)
@@ -71,9 +66,9 @@ class SQLiteLedger {
             """
             var stmt2: OpaquePointer?
             if sqlite3_prepare_v2(self.db, childrenQuery, -1, &stmt2, nil) == SQLITE_OK {
-                sqlite3_bind_text(stmt2, 1, (newPath as NSString).utf8String, -1, nil) // Replacement prefix
-                sqlite3_bind_text(stmt2, 2, (oldPath as NSString).utf8String, -1, nil) // Length calculator
-                sqlite3_bind_text(stmt2, 3, (oldPath as NSString).utf8String, -1, nil) // Matcher
+                sqlite3_bind_text(stmt2, 1, (newPath as NSString).utf8String, -1, SQLITE_TRANSIENT) // Replacement prefix
+                sqlite3_bind_text(stmt2, 2, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT) // Length calculator
+                sqlite3_bind_text(stmt2, 3, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT) // Matcher
                 sqlite3_step(stmt2)
             }
             sqlite3_finalize(stmt2)
@@ -85,21 +80,10 @@ class SQLiteLedger {
     private func handleCorruption(at url: URL) {
         print("🔥 CORRUPTION DETECTED: Resetting Ledger...")
         
-        if db != nil {
-            sqlite3_close(db)
-            db = nil
-        }
-        
-        let fileManager = FileManager.default
-        let path = url.path
-        
-        do {
-            if fileManager.fileExists(atPath: path) { try fileManager.removeItem(atPath: path) }
-            if fileManager.fileExists(atPath: path + "-wal") { try fileManager.removeItem(atPath: path + "-wal") }
-            if fileManager.fileExists(atPath: path + "-shm") { try fileManager.removeItem(atPath: path + "-shm") }
-        } catch {
-            print("⚠️ Failed to cleanup corrupted files: \(error)")
-        }
+        if db != nil { sqlite3_close(db); db = nil }
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(atPath: url.path + "-wal")
+        try? FileManager.default.removeItem(atPath: url.path + "-shm")
         
         DispatchQueue.main.async {
             NotificationManager.shared.send(
@@ -111,26 +95,21 @@ class SQLiteLedger {
     }
         
     private func createTable() {
-        var query = "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT);"
-        if sqlite3_exec(db, query, nil, nil, nil) != SQLITE_OK { print("❌ Error creating files table") }
-        
-        query = "CREATE TABLE IF NOT EXISTS uploads (path TEXT PRIMARY KEY, upload_id TEXT, timestamp DOUBLE);"
-        if sqlite3_exec(db, query, nil, nil, nil) != SQLITE_OK { print("❌ Error creating uploads table") }
+        _ = execute(sql: "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT);")
+        _ = execute(sql: "CREATE TABLE IF NOT EXISTS uploads (path TEXT PRIMARY KEY, upload_id TEXT, timestamp DOUBLE);")
     }
     
     func getStoredCasing(for relativePath: String) -> String? {
         return queue.sync {
             let query = "SELECT path FROM files WHERE path = ?;"
             var statement: OpaquePointer?
-            
             if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
-                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
-                
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 if sqlite3_step(statement) == SQLITE_ROW {
                     if let cString = sqlite3_column_text(statement, 0) {
-                        let exactStoredPath = String(cString: cString)
+                        let result = String(cString: cString)
                         sqlite3_finalize(statement)
-                        return exactStoredPath
+                        return result
                     }
                 }
             }
@@ -141,17 +120,9 @@ class SQLiteLedger {
     
     func wipe() {
         queue.async(flags: .barrier) {
-            let queryFiles = "DELETE FROM files;"
-            if sqlite3_exec(self.db, queryFiles, nil, nil, nil) != SQLITE_OK {
-                print("⚠️ Error wiping files table")
-            }
-            
-            let queryUploads = "DELETE FROM uploads;"
-            if sqlite3_exec(self.db, queryUploads, nil, nil, nil) != SQLITE_OK {
-                print("⚠️ Error wiping uploads table")
-            }
-            
-            print("☢️ Ledger Wiped Clean (Vault Switch).")
+            _ = self.execute(sql: "DELETE FROM files;")
+            _ = self.execute(sql: "DELETE FROM uploads;")
+            print("☢️ Ledger Wiped Clean.")
         }
     }
     
@@ -160,7 +131,6 @@ class SQLiteLedger {
             var paths: [String] = []
             let query = "SELECT path FROM files;"
             var statement: OpaquePointer?
-            
             if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
                 while sqlite3_step(statement) == SQLITE_ROW {
                     if let cString = sqlite3_column_text(statement, 0) {
@@ -178,15 +148,13 @@ class SQLiteLedger {
             var uploads: [ActiveUpload] = []
             let query = "SELECT path, upload_id, timestamp FROM uploads;"
             var statement: OpaquePointer?
-            
             if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
                 while sqlite3_step(statement) == SQLITE_ROW {
                     if let pathC = sqlite3_column_text(statement, 0),
                        let idC = sqlite3_column_text(statement, 1) {
-                        let path = String(cString: pathC)
-                        let id = String(cString: idC)
-                        let time = sqlite3_column_double(statement, 2)
-                        uploads.append(ActiveUpload(relativePath: path, uploadID: id, timestamp: time))
+                        uploads.append(ActiveUpload(relativePath: String(cString: pathC),
+                                                    uploadID: String(cString: idC),
+                                                    timestamp: sqlite3_column_double(statement, 2)))
                     }
                 }
             }
@@ -202,7 +170,7 @@ class SQLiteLedger {
             defer { sqlite3_finalize(statement) }
             
             if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
-                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 if sqlite3_step(statement) == SQLITE_ROW, let cString = sqlite3_column_text(statement, 0) {
                     return String(cString: cString)
                 }
@@ -218,8 +186,8 @@ class SQLiteLedger {
             defer { sqlite3_finalize(statement) }
             
             if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
-                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
-                sqlite3_bind_text(statement, 2, (uploadID as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(statement, 2, (uploadID as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
                 sqlite3_step(statement)
             }
@@ -231,7 +199,7 @@ class SQLiteLedger {
             let query = "DELETE FROM uploads WHERE path = ?;"
             var statement: OpaquePointer?
             sqlite3_prepare_v2(self.db, query, -1, &statement, nil)
-            sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
             sqlite3_step(statement)
             sqlite3_finalize(statement)
         }
@@ -241,23 +209,87 @@ class SQLiteLedger {
         return queue.sync {
             let query = "SELECT gen_id FROM files WHERE path = ?;"
             var statement: OpaquePointer?
+            var shouldUpload = true
             
             if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
-                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 
                 if sqlite3_step(statement) == SQLITE_ROW {
                     if let cString = sqlite3_column_text(statement, 0) {
                         let savedGenID = String(cString: cString)
-                        sqlite3_finalize(statement)
-                        
-                        return savedGenID != currentGenID
+                        shouldUpload = (savedGenID != currentGenID)
                     }
                 }
             }
+            sqlite3_finalize(statement)
+            return shouldUpload
+        }
+    }
+    
+    func deleteRecords(prefix: String) {
+        queue.async(flags: .barrier) {
+            let pattern = prefix + "%"
             
+            let queryFiles = "DELETE FROM files WHERE path LIKE ?;"
+            var stmt1: OpaquePointer?
+            
+            if sqlite3_prepare_v2(self.db, queryFiles, -1, &stmt1, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt1, 1, (pattern as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                if sqlite3_step(stmt1) != SQLITE_DONE {
+                    self.logError("Write Error (deleteRecords files)")
+                }
+            }
+            sqlite3_finalize(stmt1)
+            
+            let queryUploads = "DELETE FROM uploads WHERE path LIKE ?;"
+            var stmt2: OpaquePointer?
+            
+            if sqlite3_prepare_v2(self.db, queryUploads, -1, &stmt2, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt2, 1, (pattern as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                if sqlite3_step(stmt2) != SQLITE_DONE {
+                    self.logError("Write Error (deleteRecords uploads)")
+                }
+            }
+            sqlite3_finalize(stmt2)
+            
+            print("🧹 Ledger Pruned: Removed items starting with '\(prefix)'")
+        }
+    }
+    
+    func getContents(of relativePath: String) -> [FileItem] {
+        return queue.sync {
+            var items: Set<FileItem> = []
+            let prefix = relativePath.isEmpty ? "" : relativePath + "/"
+            
+            let query = "SELECT path FROM files WHERE path LIKE ? || '%';"
+            
+            var statement: OpaquePointer?
+            if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
+                sqlite3_bind_text(statement, 1, (prefix as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    if let cString = sqlite3_column_text(statement, 0) {
+                        let fullPath = String(cString: cString)
+                        
+                        if fullPath == prefix || fullPath == String(prefix.dropLast()) { continue }
+                        
+                        let remainder = String(fullPath.dropFirst(prefix.count))
+                        let components = remainder.split(separator: "/")
+                        
+                        if let firstComponent = components.first {
+                            let name = String(firstComponent)
+                            let isFolder = components.count > 1
+                            let itemPath = prefix + name
+                            items.insert(FileItem(name: name, fullPath: itemPath, isFolder: isFolder))
+                        }
+                    }
+                }
+            }
             sqlite3_finalize(statement)
             
-            return true
+            return items.sorted {
+                ($0.isFolder && !$1.isFolder) || ($0.isFolder == $1.isFolder && $0.name < $1.name)
+            }
         }
     }
     
@@ -265,11 +297,10 @@ class SQLiteLedger {
         queue.async(flags: .barrier) {
             let query = "DELETE FROM files WHERE path = ?;"
             var statement: OpaquePointer?
-            
             if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
-                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 if sqlite3_step(statement) != SQLITE_DONE {
-                    print("⚠️ SQLite Delete Error")
+                    self.logError("Write Error (removeEntry)")
                 }
             }
             sqlite3_finalize(statement)
@@ -282,14 +313,29 @@ class SQLiteLedger {
             var statement: OpaquePointer?
             
             if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
-                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, nil)
-                sqlite3_bind_text(statement, 2, (genID as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(statement, 2, (genID as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 
                 if sqlite3_step(statement) != SQLITE_DONE {
-                    print("⚠️ SQLite Write Error")
+                    self.logError("Write Error (markAsProcessed)")
                 }
+            } else {
+                self.logError("Prepare Error (markAsProcessed)")
             }
             sqlite3_finalize(statement)
+        }
+    }
+    
+    func execute(sql: String) -> Bool {
+        return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
+    }
+    
+    private func logError(_ context: String) {
+        if let errorPointer = sqlite3_errmsg(db) {
+            let message = String(cString: errorPointer)
+            print("⚠️ SQLite \(context): \(message)")
+        } else {
+            print("⚠️ SQLite \(context): Unknown error")
         }
     }
 }

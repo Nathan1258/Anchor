@@ -14,24 +14,31 @@ struct DashboardView: View {
     @ObservedObject var persistence = PersistenceManager.shared
     @ObservedObject var network = NetworkMonitor.shared
     
-    
     @Environment(\.openWindow) var openWindow
+    
+    @State private var selectedTab: Int = 0
     
     var body: some View {
         VStack(spacing: 0) {
             
-            // MARK: - Header
             HStack {
                 VStack(alignment: .leading) {
                     Text("Anchor")
                         .font(.title2)
                         .fontWeight(.bold)
-                    Text("System Status: \(statusSummary)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
+                
                 Spacer()
-                // Settings Shortcut
+                
+                Picker("", selection: $selectedTab) {
+                    Text("Monitor").tag(0)
+                    Text("Restore").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
+                
+                Spacer()
+                
                 Button(action: { openWindow(id: "settings") }) {
                     Image(systemName: "gearshape")
                 }
@@ -40,6 +47,20 @@ struct DashboardView: View {
             }
             .padding()
             .background(Color(nsColor: .windowBackgroundColor))
+            
+            if selectedTab == 0 {
+                monitorView
+            } else {
+                RestoreBrowserView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(minWidth: 600, minHeight: 400)
+    }
+    
+    // MARK: - Monitor View (Extracted)
+    var monitorView: some View {
+        VStack(spacing: 0) {
             
             if network.status == .disconnected {
                 StatusBanner(
@@ -140,16 +161,9 @@ struct DashboardView: View {
             .padding(8)
             .background(Color(nsColor: .controlBackgroundColor))
         }
-        .frame(minWidth: 600, minHeight: 400)
     }
     
     // MARK: - Computed State
-    
-    var statusSummary: String {
-        if driveWatcher.isRunning && photosWatcher.isRunning { return "Active" }
-        if driveWatcher.isRunning || photosWatcher.isRunning { return "Partially Active" }
-        return "Standby"
-    }
     
     var driveStatusColor: Color {
         switch driveWatcher.status {

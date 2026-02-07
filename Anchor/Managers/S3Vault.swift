@@ -48,6 +48,141 @@ final class S3Vault: VaultProvider {
         return S3Vault(client: client, bucket: config.bucket)
     }
     
+    func wipe(prefix: String) async throws {
+        var continuationToken: String? = nil
+        
+        repeat {
+            let listInput = ListObjectsV2Input(
+                bucket: self.bucket,
+                continuationToken: continuationToken,
+                prefix: prefix
+            )
+            
+            let listOutput = try await client.listObjectsV2(input: listInput)
+            continuationToken = listOutput.nextContinuationToken
+            
+            guard let objects = listOutput.contents, !objects.isEmpty else { break }
+            
+            let objectIds = objects.compactMap { obj -> S3ClientTypes.ObjectIdentifier? in
+                guard let key = obj.key else { return nil }
+                if key == "anchor_identity.json" { return nil }
+                return S3ClientTypes.ObjectIdentifier(key: key)
+            }
+            
+            if objectIds.isEmpty { break }
+            
+            let deleteInput = DeleteObjectsInput(
+                bucket: self.bucket,
+                delete: S3ClientTypes.Delete(objects: objectIds, quiet: true)
+            )
+            
+            _ = try await client.deleteObjects(input: deleteInput)
+            print("🔥 S3 Batch Delete: Removed \(objectIds.count) items...")
+            
+        } while continuationToken != nil
+        
+        print("✅ S3 Wipe Complete for prefix: '\(prefix)'")
+    }
+    
+    func listFiles(at path: String) async throws -> [FileMetadata] {
+        var prefix = path
+        if !prefix.isEmpty && !prefix.hasSuffix("/") {
+            prefix += "/"
+        }
+        
+        let input = ListObjectsV2Input(
+            bucket: self.bucket,
+            delimiter: "/",
+            prefix: prefix
+        )
+        
+        let output = try await client.listObjectsV2(input: input)
+        var results: [FileMetadata] = []
+        
+        if let folders = output.commonPrefixes {
+            for folder in folders {
+                guard let folderPrefix = folder.prefix else { continue }
+                
+                let name = folderPrefix.dropLast().split(separator: "/").last.map(String.init) ?? folderPrefix
+                
+                let cleanPath = folderPrefix.hasSuffix("/") ? String(folderPrefix.dropLast()) : folderPrefix
+                
+                results.append(FileMetadata(
+                    name: name,
+                    path: cleanPath,
+                    isFolder: true,
+                    size: nil,
+                    lastModified: nil
+                ))
+            }
+        }
+        
+        if let files = output.contents {
+            for file in files {
+                guard let key = file.key else { continue }
+                
+                if key == prefix { continue }
+                
+                let name = key.split(separator: "/").last.map(String.init) ?? key
+                
+                results.append(FileMetadata(
+                    name: name,
+                    path: key,
+                    isFolder: false,
+                    size: file.size,
+                    lastModified: file.lastModified
+                ))
+            }
+        }
+        
+        return results
+    }
+    
+    func listAllFiles() async throws -> [String] {
+        var paths: [String] = []
+        var continuationToken: String? = nil
+        
+        print("🔎 Starting S3 Indexing...")
+        
+        repeat {
+            let input = ListObjectsV2Input(
+                bucket: self.bucket,
+                continuationToken: continuationToken
+            )
+            let output = try await client.listObjectsV2(input: input)
+            continuationToken = output.nextContinuationToken
+            
+            if let objects = output.contents {
+                let batch = objects.compactMap { $0.key }
+                paths.append(contentsOf: batch)
+            }
+        } while continuationToken != nil
+        
+        print("✅ Indexing Complete. Found \(paths.count) items.")
+        return paths
+    }
+    
+    func downloadFile(relativePath: String, to localURL: URL) async throws {
+        print("⬇️ Requesting: \(relativePath)")
+        
+        let input = GetObjectInput(bucket: self.bucket, key: relativePath)
+        let output = try await client.getObject(input: input)
+        
+        guard let body = output.body else {
+            throw NSError(domain: "Anchor", code: 404, userInfo: [NSLocalizedDescriptionKey: "Empty body from S3"])
+        }
+        
+        guard let data = try await body.readData() else {
+            throw NSError(domain: "Anchor", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to read data from body"])
+        }
+        
+        if FileManager.default.fileExists(atPath: localURL.path) {
+            try FileManager.default.removeItem(at: localURL)
+        }
+        
+        try data.write(to: localURL)
+    }
+    
     func loadIdentity() async throws -> VaultIdentity? {
         let input = GetObjectInput(bucket: self.bucket, key: "anchor_identity.json")
         
@@ -78,13 +213,13 @@ final class S3Vault: VaultProvider {
         print("🔐 Identity file saved to S3")
     }
     
-    func saveFile(source: URL, relativePath: String) async throws {
+    func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)? = nil) async throws {
         let isDirectory = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         
         if isDirectory {
             try await savePackage(source: source, relativePath: relativePath)
         } else {
-            try await uploadSingleFile(source: source, key: relativePath)
+            try await uploadSingleFile(source: source, key: relativePath, checkCancellation: checkCancellation)
         }
     }
     
@@ -120,7 +255,7 @@ final class S3Vault: VaultProvider {
         }
     }
     
-    func uploadSingleFile(source: URL, key: String) async throws {
+    func uploadSingleFile(source: URL, key: String, checkCancellation: (() -> Bool)? = nil) async throws {
         let fileSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)) ?? 0
         let MIN_PART_SIZE: Int64 = 5 * 1024 * 1024
         
@@ -166,6 +301,16 @@ final class S3Vault: VaultProvider {
             
             
             for partNumber in 1...totalParts {
+                if let checkCancellation, checkCancellation() {
+                    print("🛑 Upload Cancelled by User: \(key)")
+                    
+                    let uploadId = currentUploadID
+                    Task {
+                        try? await self.abortUpload(key: key, uploadId: uploadId)
+                    }
+                    
+                    throw NSError(domain: "Anchor", code: 999, userInfo: [NSLocalizedDescriptionKey: "Upload Cancelled"])
+                }
                 if uploadedParts.contains(where: { $0.partNumber == partNumber }) {
                     print("⏩ Skipping part \(partNumber) (Already uploaded)")
                     continue

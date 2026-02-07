@@ -8,7 +8,13 @@ import Foundation
 
 protocol VaultProvider: Sendable {
     /// Saves a file to the vault.
-    func saveFile(source: URL, relativePath: String) async throws
+    func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)?) async throws
+    
+    /// Lists all objects (or files if local)
+    func listAllFiles() async throws -> [String]
+    
+    /// Lists all obejcts (or files if local) at a specific directory
+    func listFiles(at path: String) async throws -> [FileMetadata] // Cannot find type 'FileMetadata' in scope
     
     /// Deletes a file from the vault.
     func deleteFile(relativePath: String) async throws
@@ -23,6 +29,12 @@ protocol VaultProvider: Sendable {
     
     /// Saves the lock file during setup.
     func saveIdentity(_ identity: VaultIdentity) async throws
+    
+    /// Downloads specific file to temporary directory for restoring
+    func downloadFile(relativePath: String, to localURL: URL) async throws
+    
+    /// Deletes all files/photos
+    func wipe(prefix: String) async throws
 }
 
 class VaultFactory {

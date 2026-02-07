@@ -69,7 +69,6 @@ struct EncryptionPasswordSheet: View {
             .padding(.top)
         }
         .padding(30)
-        .frame(width: 450)
     }
     
     var confirmButtonTitle: String {

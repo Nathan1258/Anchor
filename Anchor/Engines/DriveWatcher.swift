@@ -45,7 +45,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             .sink { [weak self] _ in
                 if let date = PersistenceManager.shared.pausedUntil, Date() >= date {
                     PersistenceManager.shared.pausedUntil = nil
-                    self?.log("▶️ Global pause expired. Resuming...")
+                    self?.log("Global pause expired. Resuming...")
                     self?.startWatching()
                 }
             }
@@ -67,11 +67,11 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
                 if status == .verified {
                     if self.status == .paused {
-                        self.log("✅ Internet restored. Resuming...")
+                        self.log("Internet restored. Resuming...")
                         self.startWatching()
                     }
                 } else if status == .disconnected || status == .captivePortal {
-                    self.log("⚠️ Network issue detected. Pausing Watcher.")
+                    self.log("Network issue detected. Pausing Watcher.")
                     self.status = .paused
                 }
             }
@@ -96,7 +96,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             let isS3Ready = (PersistenceManager.shared.driveVaultType == .s3 && PersistenceManager.shared.s3Config.isValid)
             
             if isLocalReady || isS3Ready {
-                log("♻️ Restored previous session. Auto-starting...")
+                log("Restored previous session. Auto-starting...")
                 startWatching()
             }
         }
@@ -118,7 +118,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         guard PersistenceManager.shared.isDriveEnabled else { return }
         
         DispatchQueue.main.async { self.status = .newItem }
-        log("✨ New Item Detected: \(url.lastPathComponent)")
+        log("New Item Detected: \(url.lastPathComponent)")
         debounceFileEvent(at: url)
     }
     
@@ -130,7 +130,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         guard PersistenceManager.shared.isDriveEnabled else { return }
         
         DispatchQueue.main.async { self.status = .changeDetected }
-        log("Hz Change Detected: \(url.lastPathComponent)")
+        log("Change Detected: \(url.lastPathComponent)")
         debounceFileEvent(at: url)
     }
     
@@ -178,13 +178,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             PersistenceManager.shared.saveBookmark(for: newUrl, type: .driveVault)
         }
         
-        log("🔄 Vault switched. Starting fresh scan...")
+        log("Vault switched. Starting fresh scan...")
         startWatching()
     }
     
     func reconcileMirrorMode(strict: Bool) {
         guard strict else {
-            log("ℹ️ Switched to Mirror Mode. Only future deletions will be synced.")
+            log("Switched to Mirror Mode. Only future deletions will be synced.")
             return
         }
         
@@ -192,7 +192,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         
         Task {
             self.status = .scanning
-            log("🧹 Starting Reconciliation Scan (Strict Mirror)...")
+            log("Starting Reconciliation Scan (Strict Mirror)...")
             
             let trackedFiles = ledger.getAllTrackedPaths()
             var deletedCount = 0
@@ -201,7 +201,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 let sourceFile = source.appendingPathComponent(relativePath)
                 
                 if !FileManager.default.fileExists(atPath: sourceFile.path) {
-                    log("🗑️ Found orphan: \(relativePath). Deleting from Vault...")
+                    log("Found orphan: \(relativePath). Deleting from Vault...")
                     
                     self.deleteFromVault(relativePath: relativePath)
                     deletedCount += 1
@@ -211,9 +211,9 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             DispatchQueue.main.async {
                 self.status = .idle
                 if deletedCount > 0 {
-                    self.log("✅ Reconciliation Complete. Removed \(deletedCount) old files from Vault.")
+                    self.log("Reconciliation Complete. Removed \(deletedCount) old files from Vault.")
                 } else {
-                    self.log("✅ Reconciliation Complete. Vault perfectly matches Source.")
+                    self.log("Reconciliation Complete. Vault perfectly matches Source.")
                 }
             }
         }
@@ -230,7 +230,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         let oldVaultPath = getVaultPath(for: oldRelative)
         let newVaultPath = getVaultPath(for: newRelative)
         
-        log("🚚 Detected Move: \(oldRelative) -> \(newRelative)")
+        log("Detected Move: \(oldRelative) -> \(newRelative)")
         
         ledger.renamePath(from: oldRelative, to: newRelative)
         
@@ -239,7 +239,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 try await vaultProvider?.moveItem(from: oldVaultPath, to: newVaultPath)
                 self.status = .active
             } catch {
-                log("⚠️ Failed to move in Vault: \(error.localizedDescription)")
+                log("Failed to move in Vault: \(error.localizedDescription)")
                 self.handleIncomingFile(at: newURL)
             }
         }
@@ -266,7 +266,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 guard let relativePath = getRelativePath(for: url) else { return }
                 deleteFromVault(relativePath: relativePath)
             } else {
-                log("🗑️ File deleted in Cloud. Kept in Vault (Safety Net).")
+                log("File deleted in Cloud. Kept in Vault (Safety Net).")
             }
             return
         }
@@ -290,7 +290,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             let activeUploads = ledger.getAllActiveUploads()
             if activeUploads.isEmpty { return }
             
-            log("🧹 Checking \(activeUploads.count) pending uploads for staleness...")
+            log("Checking \(activeUploads.count) pending uploads for staleness...")
             
             var cleanedCount = 0
             
@@ -302,20 +302,20 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 let fileURL = source.appendingPathComponent(localRelativePath)
                 
                 if !FileManager.default.fileExists(atPath: fileURL.path) {
-                    log("🗑️ Orphan detected: \(upload.relativePath). Aborting S3 fragments...")
+                    log("Orphan detected: \(upload.relativePath). Aborting S3 fragments...")
                     
                     do {
                         try await s3Vault.abortUpload(key: upload.relativePath, uploadId: upload.uploadID)
                         ledger.removeUploadID(relativePath: upload.relativePath)
                         cleanedCount += 1
                     } catch {
-                        log("⚠️ Failed to clean orphan: \(error.localizedDescription)")
+                        log("Failed to clean orphan: \(error.localizedDescription)")
                     }
                 }
             }
             
             if cleanedCount > 0 {
-                log("✨ Cleaned up \(cleanedCount) incomplete uploads.")
+                log("Cleaned up \(cleanedCount) incomplete uploads.")
             }
         }
     }
@@ -328,12 +328,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 try await provider.deleteFile(relativePath: vaultPath)
                 ledger.removeEntry(relativePath: relativePath)
                 
-                log("🗑️ Synced Deletion: \(relativePath)")
+                log("Synced Deletion: \(relativePath)")
                 DispatchQueue.main.async {
                     self.status = .deleted(filename: (relativePath as NSString).lastPathComponent)
                 }
             } catch {
-                log("⚠️ Failed to delete vault copy: \(error.localizedDescription)")
+                log("Failed to delete vault copy: \(error.localizedDescription)")
             }
         }
     }
@@ -381,25 +381,25 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         }
         
         guard PersistenceManager.shared.isDriveEnabled else {
-            log("🚫 Drive Sync is disabled in Settings.")
+            log("Drive Sync is disabled in Settings.")
             self.status = .disabled
             return
         }
         
         guard let source = sourceURL else {
-            log("❌ Error: Select both folders first.")
+            log("Error: Select both folders first.")
             return
         }
         
         if !source.startAccessingSecurityScopedResource() {
-            log("❌ Failed to access source folder. Check Permissions.")
+            log("Failed to access source folder. Check Permissions.")
             return
         }
         
         self.status = .waitingForVault
         
         if !source.startAccessingSecurityScopedResource() {
-            log("❌ Failed to access source folder. Check Permissions.")
+            log("Failed to access source folder. Check Permissions.")
             return
         }
         
@@ -409,7 +409,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             do {
                 guard let provider = try await VaultFactory.getProvider(type: type) else {
                     DispatchQueue.main.async {
-                        self.log("❌ Error: Could not initialize Vault Provider. Check Settings.")
+                        self.log("Error: Could not initialize Vault Provider. Check Settings.")
                         self.status = .disabled
                     }
                     return
@@ -428,7 +428,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                     NSFileCoordinator.addFilePresenter(self)
                     self.isRunning = true
                     self.status = .active
-                    self.log("👀 Watcher Active (\(type == .s3 ? "Cloud Mode" : "Local Mode"))")
+                    self.log("Watcher Active (\(type == .s3 ? "Cloud Mode" : "Local Mode"))")
                     
                     self.cleanupStaleUploads()
                     self.performInitialScan()
@@ -436,7 +436,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
             } catch {
                 DispatchQueue.main.async {
-                    self.log("❌ Failed to create Vault connection: \(error.localizedDescription)")
+                    self.log("Failed to create Vault connection: \(error.localizedDescription)")
                     self.status = .disabled
                 }
             }
@@ -462,7 +462,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     private func suspendForDisconnection() {
         guard isRunning else { return }
         
-        log("⚠️ Vault disconnected! Pausing watcher...")
+        log("Vault disconnected! Pausing watcher...")
         
         NSFileCoordinator.removeFilePresenter(self)
         
@@ -481,18 +481,18 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     private func resumeFromDisconnection() {
         guard status == .waitingForVault else { return }
         
-        log("✅ Vault reconnected. Resuming...")
+        log("Vault reconnected. Resuming...")
         
         guard let newSource = PersistenceManager.shared.loadBookmark(type: .driveSource),
               let newVault = PersistenceManager.shared.loadBookmark(type: .driveVault) else {
-            log("❌ Critical: Could not restore bookmarks after reconnect.")
+            log("Critical: Could not restore bookmarks after reconnect.")
             self.status = .disabled
             return
         }
         
         guard newSource.startAccessingSecurityScopedResource(),
               newVault.startAccessingSecurityScopedResource() else {
-            log("❌ Critical: Permission denied on reconnected drive.")
+            log("Critical: Permission denied on reconnected drive.")
             self.status = .disabled
             return
         }
@@ -509,7 +509,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     func performInitialScan() {
         guard NetworkMonitor.shared.status == .verified else {
-            log("⏳ Waiting for Internet to start Smart Scan...")
+            log("Waiting for Internet to start Smart Scan...")
             self.status = .paused
             return
         }
@@ -522,7 +522,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             self.status = .scanning
             self.sessionScannedCount = 0
         }
-        log("🔎 Starting Smart Scan (Checking Generation IDs)...")
+        log("Starting Smart Scan (Checking Generation IDs)...")
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -577,7 +577,6 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
                 if isDirectory {
                     if isPackage {
-                        // It's a Bundle (e.g. .app, .numbers).
                         enumerator.skipDescendants()
                     } else {
                         continue
@@ -600,7 +599,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
                 if PersistenceManager.shared.isDriveEnabled {
                     self.status = .monitoring
-                    self.log("✅ Smart Scan Complete. Processed: \(processed), Skipped: \(skipped)")
+                    self.log("Smart Scan Complete. Processed: \(processed), Skipped: \(skipped)")
                     if processed > 0 {
                         NotificationManager.shared.send(
                             title: "Drive Scan Complete",
@@ -610,7 +609,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                     }
                 } else {
                     self.status = .disabled
-                    self.log("🚫 Scan aborted (Disabled).")
+                    self.log("Scan aborted (Disabled).")
                 }
             }
         }
@@ -649,7 +648,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     private func processFile(at url: URL, genID: String, relativePath: String) {
         guard NetworkMonitor.shared.status == .verified else {
-            log("⏳ Queued \(url.lastPathComponent) (Waiting for Internet)")
+            log("Queued \(url.lastPathComponent) (Waiting for Internet)")
             return
         }
         DispatchQueue.main.async {
@@ -658,7 +657,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         
         if let storedPath = ledger.getStoredCasing(for: relativePath) {
             if storedPath != relativePath {
-                log("🔠 Case change detected: \(storedPath) -> \(relativePath)")
+                log("Case change detected: \(storedPath) -> \(relativePath)")
                 Task {
                     try? await vaultProvider?.deleteFile(relativePath: storedPath)
                 }
@@ -673,106 +672,104 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 copyToVault(fileURL: url, relativePath: relativePath, genID: genID)
             } else if status == .notDownloaded {
                 DispatchQueue.main.async { self.status = .downloading(filename: url.lastPathComponent) }
-                log("☁️ Downloading update: \(url.lastPathComponent)")
+                log("Downloading update: \(url.lastPathComponent)")
                 try FileManager.default.startDownloadingUbiquitousItem(at: url)
             } else {
                 copyToVault(fileURL: url, relativePath: relativePath, genID: genID)
             }
         } catch {
-            log("⚠️ Error processing \(url.lastPathComponent): \(error.localizedDescription)")
+            log("Error processing \(url.lastPathComponent): \(error.localizedDescription)")
         }
     }
     
     private func copyToVault(fileURL: URL, relativePath: String, genID: String) {
         guard let provider = vaultProvider else { return }
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordError: NSError?
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
+        let tempSnapshotURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        
+        coordinator.coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &coordError) { safeURL in
+            do {
+                try FileManager.default.copyItem(at: safeURL, to: tempSnapshotURL)
+            } catch {
+                print("❌ Failed to snapshot file: \(error)")
+                return
+            }
+        }
+        
+        Task {
+            defer { try? FileManager.default.removeItem(at: tempSnapshotURL) }
             
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            var coordError: NSError?
+            await TransferQueue.shared.enqueue()
             
-            coordinator.coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &coordError) { safeURL in
+            await performWithActivity("Uploading \(fileURL)"){
+                var uploadSource = tempSnapshotURL
+                var uploadPath = self.getVaultPath(for: relativePath)
+                var wasEncrypted = false
                 
-                let fileSize = (try? safeURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 
-                if fileSize == 0 {
-                    self.log("⚠️ Zero-byte file detected after lock release: \(safeURL.lastPathComponent). Skipping.")
-                    return
-                }
-                
-                Task {
-                    await performWithActivity("Uploading \(fileURL)"){
-                        var uploadSource = safeURL
-                        var uploadPath = await self.getVaultPath(for: relativePath)
-                        var wasEncrypted = false
+                do {
+                    let preparation = try CryptoManager.shared.prepareFileForUpload(source: tempSnapshotURL)
+                    uploadSource = preparation.url
+                    wasEncrypted = preparation.isEncrypted
+                    
+                    if wasEncrypted {
+                        uploadPath += ".anchor"
+                    }
+                    
+                    try await provider.saveFile(source: uploadSource, relativePath: uploadPath){ [weak self] in
+                        guard let self = self else { return true }
                         
+                        if !self.isRunning { return true }
                         
-                        do {
-                            let preparation = try await CryptoManager.shared.prepareFileForUpload(source: safeURL)
-                            uploadSource = preparation.url
-                            wasEncrypted = preparation.isEncrypted
-                            
-                            if wasEncrypted {
-                                uploadPath += ".anchor"
-                            }
-                            
-                            try await provider.saveFile(source: uploadSource, relativePath: uploadPath){ [weak self] in
-                                guard let self = self else { return true }
-                                
-                                if !self.isRunning { return true }
-                                
-                                if !PersistenceManager.shared.isDriveEnabled { return true }
-                                
-                                if PersistenceManager.shared.isGlobalPaused { return true }
-                                
-                                return false
-                            }
-                            
-                            await self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
-                            
-                            await MainActor.run {
-                                self.sessionVaultedCount += 1
-                                self.lastSyncTime = Date()
-                                self.status = .vaulted(filename: fileURL.lastPathComponent)
-                            }
-                        }catch let error as VaultError {
-                            if case .diskFull(let required, _) = error {
-                                let sizeStr = ByteCountFormatter.string(fromByteCount: required, countStyle: .file)
-                                
-                                await MainActor.run{
-                                    self.log("⛔️ Backup Failed: Disk Full. Needed \(sizeStr).")
-                                    self.status = .disabled
-                                }
-                                
-                                DispatchQueue.main.async {
-                                    NotificationManager.shared.send(
-                                        title: "Backup Failed: Disk Full",
-                                        body: "Anchor requires \(sizeStr) to back up '\(safeURL.lastPathComponent)'. Sync has been paused.",
-                                        type: .vaultIssue
-                                    )
-                                }
-                            }
-                        } catch {
-                            await self.log("⚠️ Upload/Copy Failed: \(error.localizedDescription)")
-                            
-                            if (error as NSError).domain == NSCocoaErrorDomain {
-                                await NotificationManager.shared.send(
-                                    title: "Vault Error",
-                                    body: "Failed to save file. Check your connection.",
-                                    type: .vaultIssue
-                                )
-                            }
+                        if !PersistenceManager.shared.isDriveEnabled { return true }
+                        
+                        if PersistenceManager.shared.isGlobalPaused { return true }
+                        
+                        return false
+                    }
+                    
+                    self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
+                    
+                    await MainActor.run {
+                        self.sessionVaultedCount += 1
+                        self.lastSyncTime = Date()
+                        self.status = .vaulted(filename: fileURL.lastPathComponent)
+                    }
+                }catch let error as VaultError {
+                    if case .diskFull(let required, _) = error {
+                        let sizeStr = ByteCountFormatter.string(fromByteCount: required, countStyle: .file)
+                        
+                        await MainActor.run{
+                            self.log("Backup Failed: Disk Full. Needed \(sizeStr).")
+                            self.status = .disabled
                         }
                         
-                        await CryptoManager.shared.cleanup(url: uploadSource, wasEncrypted: wasEncrypted)
+                        DispatchQueue.main.async {
+                            NotificationManager.shared.send(
+                                title: "Backup Failed: Disk Full",
+                                body: "Anchor requires \(sizeStr) to back up '\(tempSnapshotURL.lastPathComponent)'. Sync has been paused.",
+                                type: .vaultIssue
+                            )
+                        }
+                    }
+                } catch {
+                    self.log("Upload/Copy Failed: \(error.localizedDescription)")
+                    
+                    if (error as NSError).domain == NSCocoaErrorDomain {
+                        NotificationManager.shared.send(
+                            title: "Vault Error",
+                            body: "Failed to save file. Check your connection.",
+                            type: .vaultIssue
+                        )
                     }
                 }
+                
+                CryptoManager.shared.cleanup(url: uploadSource, wasEncrypted: wasEncrypted)
             }
             
-            if let error = coordError {
-                self.log("🔒 Locked File Skipped: \(error.localizedDescription)")
-            }
+            await TransferQueue.shared.taskFinished()
         }
     }
     
@@ -782,7 +779,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
-            self.log("🏁 Baseline Scan: Marking existing files as synced (Skipping Upload)...")
+            self.log("Baseline Scan: Marking existing files as synced (Skipping Upload)...")
             
             let fileManager = FileManager.default
             let keys: [URLResourceKey] = [.generationIdentifierKey, .isDirectoryKey, .isPackageKey]
@@ -807,7 +804,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             }
             
             DispatchQueue.main.async {
-                self.log("✅ Baseline Set. Ignored \(count) existing files. Ready for new changes.")
+                self.log("Baseline Set. Ignored \(count) existing files. Ready for new changes.")
                 self.status = .monitoring
                 self.isRunning = true 
             }

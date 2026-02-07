@@ -26,6 +26,7 @@ final class S3Vault: VaultProvider {
     private init(client: S3Client, bucket: String) {
         self.client = client
         self.bucket = bucket
+        Task{ try? await cleanupOrphanedMultipartUploads() }
     }
     
     static func create(config: S3Config) async throws -> S3Vault {
@@ -46,6 +47,25 @@ final class S3Vault: VaultProvider {
         
         let client = S3Client(config: s3Config)
         return S3Vault(client: client, bucket: config.bucket)
+    }
+    
+    func cleanupOrphanedMultipartUploads() async throws {
+        let input = ListMultipartUploadsInput(bucket: self.bucket)
+        let output = try await client.listMultipartUploads(input: input)
+        
+        guard let uploads = output.uploads else { return }
+        
+        for upload in uploads {
+            if let initiated = upload.initiated,
+               Date().timeIntervalSince(initiated) > 86400,
+               let key = upload.key,
+               let uploadId = upload.uploadId {
+                
+                print("🧹 Aborting ghost upload: \(key)")
+                let abortInput = AbortMultipartUploadInput(bucket: self.bucket, key: key, uploadId: uploadId)
+                _ = try await client.abortMultipartUpload(input: abortInput)
+            }
+        }
     }
     
     func wipe(prefix: String) async throws {
@@ -77,11 +97,11 @@ final class S3Vault: VaultProvider {
             )
             
             _ = try await client.deleteObjects(input: deleteInput)
-            print("🔥 S3 Batch Delete: Removed \(objectIds.count) items...")
+            print("S3 Batch Delete: Removed \(objectIds.count) items...")
             
         } while continuationToken != nil
         
-        print("✅ S3 Wipe Complete for prefix: '\(prefix)'")
+        print("S3 Wipe Complete for prefix: '\(prefix)'")
     }
     
     func listFiles(at path: String) async throws -> [FileMetadata] {
@@ -142,7 +162,7 @@ final class S3Vault: VaultProvider {
         var paths: [String] = []
         var continuationToken: String? = nil
         
-        print("🔎 Starting S3 Indexing...")
+        print("Starting S3 Indexing...")
         
         repeat {
             let input = ListObjectsV2Input(
@@ -158,12 +178,12 @@ final class S3Vault: VaultProvider {
             }
         } while continuationToken != nil
         
-        print("✅ Indexing Complete. Found \(paths.count) items.")
+        print("Indexing Complete. Found \(paths.count) items.")
         return paths
     }
     
     func downloadFile(relativePath: String, to localURL: URL) async throws {
-        print("⬇️ Requesting: \(relativePath)")
+        print("Requesting: \(relativePath)")
         
         let input = GetObjectInput(bucket: self.bucket, key: relativePath)
         let output = try await client.getObject(input: input)
@@ -210,7 +230,7 @@ final class S3Vault: VaultProvider {
             key: "anchor_identity.json"
         )
         _ = try await client.putObject(input: input)
-        print("🔐 Identity file saved to S3")
+        print("Identity file saved to S3")
     }
     
     func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)? = nil) async throws {
@@ -244,7 +264,7 @@ final class S3Vault: VaultProvider {
         
         let uploadKey = relativePath.hasSuffix(".zip") ? relativePath : relativePath + ".zip"
         
-        print("📦 Zipped Package: \(source.lastPathComponent) -> \(uploadKey)")
+        print("Zipped Package: \(source.lastPathComponent) -> \(uploadKey)")
         
         do {
             try await uploadSingleFile(source: tempZipURL, key: uploadKey)
@@ -276,7 +296,7 @@ final class S3Vault: VaultProvider {
             uploadID = response.uploadId
             if let id = uploadID {
                 ledger.saveUploadID(relativePath: key, uploadID: id)
-                print("🚀 Started Multipart Upload: \(key)")
+                print("Started Multipart Upload: \(key)")
             }
         }
         
@@ -302,7 +322,7 @@ final class S3Vault: VaultProvider {
             
             for partNumber in 1...totalParts {
                 if let checkCancellation, checkCancellation() {
-                    print("🛑 Upload Cancelled by User: \(key)")
+                    print("Upload Cancelled by User: \(key)")
                     
                     let uploadId = currentUploadID
                     Task {
@@ -312,7 +332,7 @@ final class S3Vault: VaultProvider {
                     throw NSError(domain: "Anchor", code: 999, userInfo: [NSLocalizedDescriptionKey: "Upload Cancelled"])
                 }
                 if uploadedParts.contains(where: { $0.partNumber == partNumber }) {
-                    print("⏩ Skipping part \(partNumber) (Already uploaded)")
+                    print("Skipping part \(partNumber) (Already uploaded)")
                     continue
                 }
                 
@@ -322,7 +342,7 @@ final class S3Vault: VaultProvider {
                 
                 if chunkData.isEmpty { break }
                 
-                print("⬆️ Uploading part \(partNumber)/\(totalParts)...")
+                print("Uploading part \(partNumber)/\(totalParts)...")
                 let uploadPartInput = UploadPartInput(
                     body: .data(chunkData),
                     bucket: bucket,
@@ -345,13 +365,13 @@ final class S3Vault: VaultProvider {
             _ = try await client.completeMultipartUpload(input: completeInput)
             
             ledger.removeUploadID(relativePath: key)
-            print("✅ Multipart Upload Complete: \(key)")
+            print("Multipart Upload Complete: \(key)")
             
         } catch {
-            print("⚠️ Multipart Error: \(error)")
+            print("Multipart Error: \(error)")
             
             if !FileManager.default.fileExists(atPath: source.path) {
-                print("🗑️ Source file missing. Aborting S3 upload to cleanup.")
+                print("Source file missing. Aborting S3 upload to cleanup.")
                 try? await abortUpload(key: key, uploadId: currentUploadID)
                 ledger.removeUploadID(relativePath: key)
             }
@@ -360,39 +380,79 @@ final class S3Vault: VaultProvider {
     }
     
     func moveItem(from oldPath: String, to newPath: String) async throws {
-        let listInput = ListObjectsV2Input(bucket: self.bucket, prefix: oldPath)
-        let output = try await client.listObjectsV2(input: listInput)
+        let headInput = HeadObjectInput(bucket: self.bucket, key: oldPath)
+        let headOutput = try await client.headObject(input: headInput)
+        let size = headOutput.contentLength ?? 0
         
-        guard let objects = output.contents, !objects.isEmpty else { return }
-        
-        print("☁️ S3 Move Detected: Processing \(objects.count) items...")
-        
-        for object in objects {
-            guard let oldKey = object.key else { continue }
-            
-            let suffix = String(oldKey.dropFirst(oldPath.count))
-            let newKey = newPath + suffix
-            
+        if size > 5 * 1024 * 1024 * 1024 {
+            try await performMultipartCopy(sourceKey: oldPath, destKey: newPath, size: Int64(size))
+        } else {
             let copyInput = CopyObjectInput(
                 bucket: self.bucket,
-                copySource: "\(self.bucket)/\(oldKey)",
-                key: newKey
+                copySource: "\(self.bucket)/\(oldPath)",
+                key: newPath
             )
-            
             _ = try await client.copyObject(input: copyInput)
-            
-            let deleteInput = DeleteObjectInput(bucket: self.bucket, key: oldKey)
-            _ = try await client.deleteObject(input: deleteInput)
         }
         
-        print("✅ S3 Smart Move Complete: \(oldPath) -> \(newPath)")
+        let deleteInput = DeleteObjectInput(bucket: self.bucket, key: oldPath)
+        _ = try await client.deleteObject(input: deleteInput)
+    }
+    
+    func performMultipartCopy(sourceKey: String, destKey: String, size: Int64) async throws {
+        print("📦 Starting Multipart Copy for large file (>5GB)")
+        
+        let createInput = CreateMultipartUploadInput(bucket: self.bucket, key: destKey)
+        let createOutput = try await client.createMultipartUpload(input: createInput)
+        guard let uploadId = createOutput.uploadId else { return }
+        
+        let partSize: Int64 = 100 * 1024 * 1024
+        let totalParts = Int(ceil(Double(size) / Double(partSize)))
+        var completedParts: [CompletedPart] = []
+        
+        do {
+            for partNum in 1...totalParts {
+                let startByte = Int64(partNum - 1) * partSize
+                let endByte = min(startByte + partSize - 1, size - 1)
+                let range = "bytes=\(startByte)-\(endByte)"
+                
+                let copyPartInput = UploadPartCopyInput(
+                    bucket: self.bucket,
+                    copySource: "\(self.bucket)/\(sourceKey)",
+                    copySourceRange: range,
+                    key: destKey,
+                    partNumber: partNum,
+                    uploadId: uploadId
+                )
+                
+                let output = try await client.uploadPartCopy(input: copyPartInput)
+                
+                if let eTag = output.copyPartResult?.eTag {
+                    completedParts.append(CompletedPart(eTag: eTag, partNumber: partNum))
+                }
+            }
+            
+            let completeInput = CompleteMultipartUploadInput(
+                bucket: self.bucket,
+                key: destKey,
+                multipartUpload: CompletedMultipartUpload(parts: completedParts.sorted { $0.partNumber! < $1.partNumber! }),
+                uploadId: uploadId
+            )
+            _ = try await client.completeMultipartUpload(input: completeInput)
+            print("✅ Large file move complete.")
+            
+        } catch {
+            let abortInput = AbortMultipartUploadInput(bucket: self.bucket, key: destKey, uploadId: uploadId)
+            _ = try? await client.abortMultipartUpload(input: abortInput)
+            throw error
+        }
     }
     
     private func simpleUpload(source: URL, relativePath: String) async throws {
         let data = try Data(contentsOf: source) 
         let input = PutObjectInput(body: .data(data), bucket: bucket, key: relativePath)
         _ = try await client.putObject(input: input)
-        print("☁️ Simple Upload Success: \(relativePath)")
+        print("Simple Upload Success: \(relativePath)")
     }
     
     func abortUpload(key: String, uploadId: String) async throws {
@@ -407,7 +467,7 @@ final class S3Vault: VaultProvider {
         let zipInput = DeleteObjectInput(bucket: self.bucket, key: relativePath + ".zip")
         _ = try await client.deleteObject(input: zipInput)
         
-        print("☁️ S3 Delete Success: \(relativePath) (and potential .zip)")
+        print("S3 Delete Success: \(relativePath) (and potential .zip)")
     }
     
     func fileExists(relativePath: String) async -> Bool {
@@ -441,6 +501,6 @@ final class S3Vault: VaultProvider {
         )
         _ = try await client.deleteObject(input: deleteInput)
         
-        print("✅ Connection Test Passed")
+        print("Connection Test Passed")
     }
 }

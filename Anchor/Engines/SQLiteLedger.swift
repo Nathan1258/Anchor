@@ -11,7 +11,6 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 
 class SQLiteLedger: @unchecked Sendable {
     private var db: OpaquePointer?
-    // Serial queue for writes to prevent locking, concurrent for reads
     private let queue = DispatchQueue(label: "com.anchor.sqlite", attributes: .concurrent)
         
     init() {
@@ -25,7 +24,7 @@ class SQLiteLedger: @unchecked Sendable {
             handleCorruption(at: fileURL)
             
             if !openDatabase(at: fileURL) {
-                print("❌ CRITICAL: Failed to initialize fresh database.")
+                print("CRITICAL: Failed to initialize fresh database.")
             }
         }
         
@@ -73,12 +72,12 @@ class SQLiteLedger: @unchecked Sendable {
             }
             sqlite3_finalize(stmt2)
             
-            print("📖 Ledger updated: \(oldPath) -> \(newPath)")
+            print("Ledger updated: \(oldPath) -> \(newPath)")
         }
     }
     
     private func handleCorruption(at url: URL) {
-        print("🔥 CORRUPTION DETECTED: Resetting Ledger...")
+        print("CORRUPTION DETECTED: Resetting Ledger...")
         
         if db != nil { sqlite3_close(db); db = nil }
         try? FileManager.default.removeItem(at: url)
@@ -122,7 +121,7 @@ class SQLiteLedger: @unchecked Sendable {
         queue.async(flags: .barrier) {
             _ = self.execute(sql: "DELETE FROM files;")
             _ = self.execute(sql: "DELETE FROM uploads;")
-            print("☢️ Ledger Wiped Clean.")
+            print("Ledger Wiped Clean.")
         }
     }
     
@@ -252,7 +251,7 @@ class SQLiteLedger: @unchecked Sendable {
             }
             sqlite3_finalize(stmt2)
             
-            print("🧹 Ledger Pruned: Removed items starting with '\(prefix)'")
+            print("Ledger Pruned: Removed items starting with '\(prefix)'")
         }
     }
     
@@ -333,9 +332,9 @@ class SQLiteLedger: @unchecked Sendable {
     private func logError(_ context: String) {
         if let errorPointer = sqlite3_errmsg(db) {
             let message = String(cString: errorPointer)
-            print("⚠️ SQLite \(context): \(message)")
+            print("SQLite \(context): \(message)")
         } else {
-            print("⚠️ SQLite \(context): Unknown error")
+            print("SQLite \(context): Unknown error")
         }
     }
 }

@@ -104,7 +104,7 @@ final class LocalVault: VaultProvider {
             try FileManager.default.removeItem(at: targetURL)
         }
         
-        print("🗑️ Local Wipe Complete: \(targetURL.lastPathComponent)")
+        print("Local Wipe Complete: \(targetURL.lastPathComponent)")
     }
     
     func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)? = nil) async throws {
@@ -131,7 +131,7 @@ final class LocalVault: VaultProvider {
         }
         
         try FileManager.default.copyItem(at: source, to: destURL)
-        print("📂 Local Copy Success: \(relativePath)")
+        print("Local Copy Success: \(relativePath)")
     }
     
     func deleteFile(relativePath: String) async throws {
@@ -139,7 +139,7 @@ final class LocalVault: VaultProvider {
         
         if FileManager.default.fileExists(atPath: destURL.path) {
             try FileManager.default.removeItem(at: destURL)
-            print("🗑️ Local Delete Success: \(relativePath)")
+            print("Local Delete Success: \(relativePath)")
         }
     }
     
@@ -150,7 +150,7 @@ final class LocalVault: VaultProvider {
         try FileManager.default.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
         
         try FileManager.default.moveItem(at: src, to: dst)
-        print("📂 Local Move Success: \(oldPath) -> \(newPath)")
+        print("Local Move Success: \(oldPath) -> \(newPath)")
     }
     
     func fileExists(relativePath: String) async -> Bool {

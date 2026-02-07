@@ -53,7 +53,7 @@ class ReIndexManager: ObservableObject {
                 finish("✅ Index Rebuilt: \(allPaths.count) files found.")
                 
             } catch {
-                finish("❌ Error: \(error.localizedDescription)")
+                finish("Error: \(error.localizedDescription)")
             }
         }
     }
@@ -62,12 +62,6 @@ class ReIndexManager: ObservableObject {
         DispatchQueue.main.async {
             self.statusMessage = msg
             self.isIndexing = false
-            
-            if msg.starts(with: "✅") {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                    if self.statusMessage == msg { self.statusMessage = "" }
-                }
-            }
         }
     }
 }

@@ -44,12 +44,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 
                 if status == .verified {
                     if self.status == .paused && !PersistenceManager.shared.isGlobalPaused {
-                        self.log("✅ Internet restored. Resuming Photo Watcher...")
-                        self.checkForChanges() // Trigger a check immediately
+                        self.log("Internet restored. Resuming Photo Watcher...")
+                        self.checkForChanges()
                     }
                 }
                 else if status == .disconnected || status == .captivePortal {
-                    self.log("⚠️ Network issue. Pausing Photo Watcher.")
+                    self.log("Network issue. Pausing Photo Watcher.")
                     self.status = .paused
                 }
             }
@@ -61,7 +61,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 .autoconnect()
                 .sink { [weak self] _ in
                     if !PersistenceManager.shared.isGlobalPaused && self?.status == .paused {
-                        self?.log("▶️ Global pause expired. Resuming...")
+                        self?.log("Global pause expired. Resuming...")
                         self?.startWatching()
                     }
                 }
@@ -80,7 +80,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let isS3Ready = (PersistenceManager.shared.photoVaultType == .s3 && PersistenceManager.shared.s3Config.isValid)
         
         if isLocalReady || isS3Ready {
-            log("♻️ Restored previous session. Auto-starting...")
+            log("Restored previous session. Auto-starting...")
             startWatching()
         }
     }
@@ -96,7 +96,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 self.vaultURL = url
                 PersistenceManager.shared.photoVaultType = .local
                 PersistenceManager.shared.saveBookmark(for: url, type: .photoVault)
-                self.log("📸 Photo Vault set to: \(url.path)")
+                self.log("Photo Vault set to: \(url.path)")
             }
         }
     }
@@ -109,13 +109,13 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         
         guard PersistenceManager.shared.isPhotosEnabled else {
-            log("🚫 Photo Backup is disabled in Settings.")
+            log("Photo Backup is disabled in Settings.")
             self.status = .disabled
             return
         }
         
         if PersistenceManager.shared.photoVaultType == .local && vaultURL == nil {
-            log("⚠️ Select a Vault folder first.")
+            log("Select a Vault folder first.")
             return
         }
         
@@ -127,7 +127,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             do {
                 guard let provider = try await VaultFactory.getProvider(type: type) else {
                     DispatchQueue.main.async {
-                        self.log("❌ Error: Could not initialize Photo Vault Provider.")
+                        self.log("Error: Could not initialize Photo Vault Provider.")
                         self.status = .disabled
                     }
                     return
@@ -148,7 +148,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 
             } catch {
                 DispatchQueue.main.async {
-                    self.log("❌ Connection Error: \(error.localizedDescription)")
+                    self.log("Connection Error: \(error.localizedDescription)")
                     self.status = .disabled
                 }
             }
@@ -164,7 +164,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         self.checkForChanges()
                     }
                 } else {
-                    self.log("❌ Photos Access Denied.")
+                    self.log("Photos Access Denied.")
                     self.status = .accessDenied
                 }
             }
@@ -176,7 +176,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         vaultMonitor = VaultMonitor(url: url)
         
         vaultMonitor?.onDisconnect = { [weak self] in
-            self?.log("⚠️ Photo Vault disconnected! Pausing export.")
+            self?.log("Photo Vault disconnected! Pausing export.")
             
             self?.vaultURL?.stopAccessingSecurityScopedResource()
             
@@ -190,19 +190,19 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         
         vaultMonitor?.onReconnect = { [weak self] in
-            self?.log("✅ Photo Vault reconnected. Resuming...")
+            self?.log("Photo Vault reconnected. Resuming...")
             guard let newVault = PersistenceManager.shared.loadBookmark(type: .photoVault) else {
-                self?.log("❌ Failed to resolve bookmark.")
+                self?.log("Failed to resolve bookmark.")
                 return
             }
             
             if newVault.startAccessingSecurityScopedResource() {
                 self?.vaultURL = newVault
                 self?.status = .monitoring
-                self?.log("✅ Resumed.")
+                self?.log("Resumed.")
                 self?.checkForChanges()
             } else {
-                self?.log("❌ Permission denied on reconnect.")
+                self?.log("Permission denied on reconnect.")
                 self?.status = .accessDenied
                 
             }
@@ -215,7 +215,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         PHPhotoLibrary.shared().register(self)
         self.isRunning = true
         self.status = .monitoring
-        self.log("👀 Watching Photo Library for changes...")
+        self.log("Watching Photo Library for changes...")
     }
     
     private func checkForChanges() {
@@ -235,13 +235,13 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             self.status = .checkingForChanges
         }
         
-        log("🔎 Checking for new photos since last run...")
+        log("Checking for new photos since last run...")
         
         do {
             let changes = try PHPhotoLibrary.shared().fetchPersistentChanges(since: lastToken)
             processDelta(changes)
         } catch {
-            log("⚠️ Error checking changes: \(error). Falling back to full scan.")
+            log("Error checking changes: \(error). Falling back to full scan.")
             performFullScan()
         }
     }
@@ -259,7 +259,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             }
             
             if !isNetworkReady {
-                self.log("⏳ Network unavailable. Skipping photo sync (will retry).")
+                self.log("Network unavailable. Skipping photo sync (will retry).")
                 DispatchQueue.main.async { self.status = .paused }
                 return
             }
@@ -306,7 +306,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     }
                     
                 }catch{
-                    self.logs.append("⚠️ Error processing change: \(error)")
+                    self.logs.append("Error processing change: \(error)")
                     continue
                 }
             }
@@ -316,7 +316,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 if PersistenceManager.shared.isPhotosEnabled {
                     if addedCount > 0 || updatedCount > 0 {
                         self.status = .synced(count: addedCount)
-                        self.log("⚡️ Delta Sync: \(addedCount) added, \(updatedCount) updated.")
+                        self.log("Delta Sync: \(addedCount) added, \(updatedCount) updated.")
                         NotificationManager.shared.send(
                             title: "Photos Synced",
                             body: "Saved \(addedCount) new photos to Vault.",
@@ -324,7 +324,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         )
                     } else {
                         self.status = .upToDate
-                        self.log("✅ Smart Scan: No relevant changes found.")
+                        self.log("Smart Scan: No relevant changes found.")
                     }
                 } else {
                     self.status = .disabled
@@ -343,11 +343,11 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         self.lastPhotoProcessed = "-"
         
         if importHistory {
-            log("🔄 Vault switched. Starting full library export to new destination...")
+            log("Vault switched. Starting full library export to new destination...")
         } else {
             let currentToken = PHPhotoLibrary.shared().currentChangeToken
             PersistenceManager.shared.savePhotoToken(currentToken)
-            log("🏁 Baseline reset. Only new photos will be saved to the new destination.")
+            log("Baseline reset. Only new photos will be saved to the new destination.")
         }
         
         PersistenceManager.shared.photoVaultType = type
@@ -367,12 +367,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         
         PersistenceManager.shared.savePhotoToken(currentToken)
         
-        self.log("🏁 Baseline set. Skipping historical import. Only new photos will be synced.")
+        self.log("Baseline set. Skipping historical import. Only new photos will be synced.")
     }
     
     private func performFullScan() {
         guard NetworkMonitor.shared.status == .verified else {
-            log("⏳ Waiting for Internet to start Full Scan...")
+            log("Waiting for Internet to start Full Scan...")
             self.status = .paused
             return
         }
@@ -384,7 +384,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             self.status = .scanning
             self.isProcessing = true
         }
-        log("🐢 First Run: Scanning entire library...")
+        log("First Run: Scanning entire library...")
         
         exportQueue.async {
             guard PersistenceManager.shared.isPhotosEnabled else { return }
@@ -422,7 +422,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             DispatchQueue.main.async {
                 self.isProcessing = false
                 self.status = .backupComplete
-                self.log("✅ Full Scan Complete. Token Saved.")
+                self.log("Full Scan Complete. Token Saved.")
                 
                 NotificationManager.shared.send(
                     title: "Photo Backup Complete",
@@ -495,7 +495,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             PHAssetResourceManager.default().writeData(for: resource, toFile: tempFileURL, options: options) { error in
                 if let error {
                     Task { @MainActor in
-                        self.log("⚠️ Failed: \(filename) - \(error.localizedDescription)")
+                        self.log("Failed: \(filename) - \(error.localizedDescription)")
                     }
                     
                     if (error as NSError).domain == NSCocoaErrorDomain && (error as NSError).code == 4 {
@@ -542,7 +542,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         
                     } catch {
                         await Task { @MainActor in
-                            self.log("⚠️ Upload Failed: \(filename) - \(error.localizedDescription)")
+                            self.log("Upload Failed: \(filename) - \(error.localizedDescription)")
                         }.value
                     }
                     
@@ -567,12 +567,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     
                     if let primeFile = results.savedFilenames.first {
                         self.lastPhotoProcessed = primeFile
-                        self.log(forceOverwrite ? "♻️ Updated: \(primeFile)" : "✅ Saved: \(primeFile) (+ components)")
+                        self.log(forceOverwrite ? "Updated: \(primeFile)" : "Saved: \(primeFile) (+ components)")
                     }
                 }
                 
                 if !results.errors.isEmpty {
-                    self.log("⚠️ Issues saving asset components: \(results.errors.joined(separator: ", "))")
+                    self.log("Issues saving asset components: \(results.errors.joined(separator: ", "))")
                 }
             }
         }

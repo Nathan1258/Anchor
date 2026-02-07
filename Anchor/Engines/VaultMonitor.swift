@@ -64,12 +64,12 @@ class VaultMonitor {
             DispatchQueue.main.async {
                 if (pathExists && !isInTrash) && !self.isConnected {
                     self.isConnected = true
-                    print("🔌 Vault Reconnected: \(self.vaultURL.lastPathComponent)")
+                    print("Vault Reconnected: \(self.vaultURL.lastPathComponent)")
                     self.onReconnect?()
                     
                 } else if (!pathExists || isInTrash) && self.isConnected {
                     self.isConnected = false
-                    print("🔌 Vault Disconnected: \(self.vaultURL.lastPathComponent)")
+                    print("Vault Disconnected: \(self.vaultURL.lastPathComponent)")
                     self.onDisconnect?()
                 }
             }

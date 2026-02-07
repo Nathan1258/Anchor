@@ -7,5 +7,5 @@
 import Foundation
 
 enum CryptoError: Error {
-    case noKeyConfigured, corruptHeader, corruptData, fileTooLarge, invalidPassword, keyDerivationFailed
+    case noKeyConfigured, corruptHeader, corruptData, fileTooLarge, invalidPassword, keyDerivationFailed, insufficientDiskSpace
 }

@@ -74,6 +74,15 @@ class CryptoManager {
     func encryptFile(source: URL) throws -> URL {
         guard let key = symmetricKey else { throw CryptoError.noKeyConfigured }
         
+        let sourceSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        let estimatedEncryptedSize = estimateEncryptedSize(sourceSize: sourceSize)
+        let availableSpace = try getAvailableDiskSpace()
+        let safetyBuffer: Int64 = 500 * 1024 * 1024
+        
+        if availableSpace < (estimatedEncryptedSize + safetyBuffer) {
+            throw CryptoError.insufficientDiskSpace
+        }
+        
         let tempDir = FileManager.default.temporaryDirectory
         let destURL = tempDir.appendingPathComponent(UUID().uuidString + ".anchor")
         
@@ -123,9 +132,15 @@ class CryptoManager {
         let reader = try FileHandle(forReadingFrom: source)
         let writer = try FileHandle(forWritingTo: dest)
         
+        var decryptionError: Error? = nil
+        
         defer {
             try? reader.close()
             try? writer.close()
+            
+            if decryptionError != nil {
+                try? FileManager.default.removeItem(at: dest)
+            }
         }
         
         let fileSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -145,10 +160,14 @@ class CryptoManager {
                     writer.write(decryptedData)
                 } catch {
                     print("Decryption Error at offset \(currentOffset): \(error)")
+                    decryptionError = error
                 }
             }
         }
-
+        
+        if let error = decryptionError {
+            throw error
+        }
     }
 
     
@@ -207,5 +226,20 @@ class CryptoManager {
         var data = Data(count: count)
         _ = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!) }
         return data
+    }
+    
+    private func getAvailableDiskSpace() throws -> Int64 {
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        let values = try fileURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        guard let capacity = values.volumeAvailableCapacityForImportantUsage else {
+            throw CryptoError.insufficientDiskSpace
+        }
+        return capacity
+    }
+    
+    private func estimateEncryptedSize(sourceSize: Int64) -> Int64 {
+        let numChunks = (sourceSize + Int64(rawChunkSize) - 1) / Int64(rawChunkSize)
+        let overhead = 12 + 16
+        return sourceSize + (numChunks * Int64(overhead))
     }
 }

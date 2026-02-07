@@ -308,7 +308,34 @@ final class S3Vault: VaultProvider {
         
         do {
             let listInput = ListPartsInput(bucket: bucket, key: key, uploadId: currentUploadID)
-            let listResponse = try await client.listParts(input: listInput)
+            let listResponse: ListPartsOutput
+            
+            do {
+                listResponse = try await client.listParts(input: listInput)
+            } catch {
+                let errorString = String(describing: error)
+                if errorString.contains("NoSuchUpload") {
+                    print("⚠️ Zombie Upload ID detected for \(key). Forgetting and restarting...")
+                    ledger.removeUploadID(relativePath: key)
+                    
+                    let createInput = CreateMultipartUploadInput(bucket: bucket, key: key)
+                    let response = try await client.createMultipartUpload(input: createInput)
+                    guard let newUploadID = response.uploadId else {
+                        throw NSError(domain: "Anchor", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to create new upload after zombie detection"])
+                    }
+                    ledger.saveUploadID(relativePath: key, uploadID: newUploadID)
+                    
+                    let retryListInput = ListPartsInput(bucket: bucket, key: key, uploadId: newUploadID)
+                    listResponse = try await client.listParts(input: retryListInput)
+                    uploadID = newUploadID
+                } else {
+                    throw error
+                }
+            }
+            
+            guard let finalUploadID = uploadID else {
+                throw NSError(domain: "Anchor", code: 500, userInfo: [NSLocalizedDescriptionKey: "Upload ID became nil"])
+            }
             
             if let parts = listResponse.parts {
                 for part in parts {
@@ -324,9 +351,8 @@ final class S3Vault: VaultProvider {
                 if let checkCancellation, checkCancellation() {
                     print("Upload Cancelled by User: \(key)")
                     
-                    let uploadId = currentUploadID
                     Task {
-                        try? await self.abortUpload(key: key, uploadId: uploadId)
+                        try? await self.abortUpload(key: key, uploadId: finalUploadID)
                     }
                     
                     throw NSError(domain: "Anchor", code: 999, userInfo: [NSLocalizedDescriptionKey: "Upload Cancelled"])
@@ -348,7 +374,7 @@ final class S3Vault: VaultProvider {
                     bucket: bucket,
                     key: key,
                     partNumber: partNumber,
-                    uploadId: currentUploadID
+                    uploadId: finalUploadID
                 )
                 
                 let partResponse = try await client.uploadPart(input: uploadPartInput)
@@ -359,7 +385,7 @@ final class S3Vault: VaultProvider {
                 bucket: bucket,
                 key: key,
                 multipartUpload: CompletedMultipartUpload(parts: uploadedParts.sorted { $0.partNumber! < $1.partNumber! }),
-                uploadId: currentUploadID
+                uploadId: finalUploadID
             )
             
             _ = try await client.completeMultipartUpload(input: completeInput)
@@ -372,7 +398,9 @@ final class S3Vault: VaultProvider {
             
             if !FileManager.default.fileExists(atPath: source.path) {
                 print("Source file missing. Aborting S3 upload to cleanup.")
-                try? await abortUpload(key: key, uploadId: currentUploadID)
+                if let uploadIdToAbort = uploadID {
+                    try? await abortUpload(key: key, uploadId: uploadIdToAbort)
+                }
                 ledger.removeUploadID(relativePath: key)
             }
             throw error

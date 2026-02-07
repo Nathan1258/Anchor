@@ -200,6 +200,12 @@ struct RestoreBrowserView: View {
                          successCount += 1
                      } catch {
                          print("💥 Processing Error for \(relativePath): \(error)")
+                         
+                         if FileManager.default.fileExists(atPath: localFileDest.path) {
+                             try? FileManager.default.removeItem(at: localFileDest)
+                             print("🗑️  Removed corrupt file: \(localFileDest.lastPathComponent)")
+                         }
+                         
                          failCount += 1
                      }
                      try? FileManager.default.removeItem(at: url)

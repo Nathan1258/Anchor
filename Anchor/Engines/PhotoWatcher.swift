@@ -540,6 +540,23 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                             await collector.addSavedFile(filename)
                         }
                         
+                    } catch let error as CryptoError {
+                        if case .insufficientDiskSpace = error {
+                            await Task { @MainActor in
+                                self.log("Encryption Failed: Insufficient disk space for '\(filename)'.")
+                                self.status = .paused
+                            }.value
+                            
+                            await NotificationManager.shared.send(
+                                title: "Photo Encryption Failed",
+                                body: "Not enough disk space to encrypt photos. Free up space to continue.",
+                                type: .vaultIssue
+                            )
+                        } else {
+                            await Task { @MainActor in
+                                self.log("Encryption Error: \(filename) - \(error.localizedDescription)")
+                            }.value
+                        }
                     } catch {
                         await Task { @MainActor in
                             self.log("Upload Failed: \(filename) - \(error.localizedDescription)")

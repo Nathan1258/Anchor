@@ -94,8 +94,11 @@ class SQLiteLedger: @unchecked Sendable {
     }
         
     private func createTable() {
-        _ = execute(sql: "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT);")
+        _ = execute(sql: "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT, failure_count INTEGER DEFAULT 0);")
         _ = execute(sql: "CREATE TABLE IF NOT EXISTS uploads (path TEXT PRIMARY KEY, upload_id TEXT, timestamp DOUBLE);")
+        
+        // Migration: Add failure_count column if it doesn't exist
+        _ = execute(sql: "ALTER TABLE files ADD COLUMN failure_count INTEGER DEFAULT 0;")
     }
     
     func getStoredCasing(for relativePath: String) -> String? {
@@ -308,7 +311,7 @@ class SQLiteLedger: @unchecked Sendable {
     
     func markAsProcessed(relativePath: String, genID: String) {
         queue.async(flags: .barrier) {
-            let query = "INSERT OR REPLACE INTO files (path, gen_id) VALUES (?, ?);"
+            let query = "INSERT OR REPLACE INTO files (path, gen_id, failure_count) VALUES (?, ?, 0);"
             var statement: OpaquePointer?
             
             if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
@@ -320,6 +323,46 @@ class SQLiteLedger: @unchecked Sendable {
                 }
             } else {
                 self.logError("Prepare Error (markAsProcessed)")
+            }
+            sqlite3_finalize(statement)
+        }
+    }
+    
+    func getFailureCount(relativePath: String) -> Int {
+        return queue.sync {
+            let query = "SELECT failure_count FROM files WHERE path = ?;"
+            var statement: OpaquePointer?
+            var count = 0
+            
+            if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                
+                if sqlite3_step(statement) == SQLITE_ROW {
+                    count = Int(sqlite3_column_int(statement, 0))
+                }
+            }
+            sqlite3_finalize(statement)
+            return count
+        }
+    }
+    
+    func incrementFailureCount(relativePath: String, genID: String) {
+        queue.async(flags: .barrier) {
+            let query = """
+                INSERT INTO files (path, gen_id, failure_count) VALUES (?, ?, 1)
+                ON CONFLICT(path) DO UPDATE SET failure_count = failure_count + 1;
+            """
+            var statement: OpaquePointer?
+            
+            if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(statement, 2, (genID as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                
+                if sqlite3_step(statement) != SQLITE_DONE {
+                    self.logError("Write Error (incrementFailureCount)")
+                }
+            } else {
+                self.logError("Prepare Error (incrementFailureCount)")
             }
             sqlite3_finalize(statement)
         }

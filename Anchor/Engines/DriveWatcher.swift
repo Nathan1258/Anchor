@@ -275,6 +275,14 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
               !ExclusionManager.shared.shouldIgnore(url: url)
         else { return }
         
+        // Check if this file has failed too many times
+        let failureCount = ledger.getFailureCount(relativePath: metadata.relativePath)
+        if failureCount >= 3 {
+            log("Skipping \(url.lastPathComponent) - Max retry limit reached (3 failures)")
+            DispatchQueue.main.async { self.status = .monitoring }
+            return
+        }
+        
         if ledger.shouldProcess(relativePath: metadata.relativePath, currentGenID: metadata.genID) {
             processFile(at: url, genID: metadata.genID, relativePath: metadata.relativePath)
         } else {
@@ -585,6 +593,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
                 guard let metadata = self.extractMetadata(for: fileURL) else { continue }
                 
+                // Skip files that have failed too many times
+                let failureCount = self.ledger.getFailureCount(relativePath: metadata.relativePath)
+                if failureCount >= 3 {
+                    skipped += 1
+                    continue
+                }
+                
                 if self.ledger.shouldProcess(relativePath: metadata.relativePath, currentGenID: metadata.genID) {
                     self.processFile(at: fileURL, genID: metadata.genID, relativePath: metadata.relativePath)
                     processed += 1
@@ -730,6 +745,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                         return false
                     }
                     
+                    // Success: Reset failure count and mark as processed
                     self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
                     
                     await MainActor.run {
@@ -738,6 +754,9 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                         self.status = .vaulted(filename: fileURL.lastPathComponent)
                     }
                 }catch let error as VaultError {
+                    // Increment failure count for this file
+                    self.ledger.incrementFailureCount(relativePath: relativePath, genID: genID)
+                    
                     if case .diskFull(let required, _) = error {
                         let sizeStr = ByteCountFormatter.string(fromByteCount: required, countStyle: .file)
                         
@@ -753,11 +772,54 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                                 type: .vaultIssue
                             )
                         }
+                    } else {
+                        let failureCount = self.ledger.getFailureCount(relativePath: relativePath)
+                        if failureCount >= 3 {
+                            await MainActor.run {
+                                self.log("File '\(fileURL.lastPathComponent)' has reached max retry limit (3). Will skip future attempts.")
+                            }
+                            NotificationManager.shared.send(
+                                title: "Upload Failed",
+                                body: "'\(fileURL.lastPathComponent)' failed 3 times and will be skipped. Check logs.",
+                                type: .vaultIssue
+                            )
+                        }
+                    }
+                } catch let error as CryptoError {
+                    if case .insufficientDiskSpace = error {
+                        await MainActor.run {
+                            self.log("Encryption Failed: Insufficient disk space for '\(fileURL.lastPathComponent)'.")
+                            self.status = .disabled
+                        }
+                        
+                        let sourceSize = (try? tempSnapshotURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file)
+                        
+                        NotificationManager.shared.send(
+                            title: "Encryption Failed: Disk Full",
+                            body: "Not enough space to encrypt '\(fileURL.lastPathComponent)' (\(sizeStr)). Free up disk space.",
+                            type: .vaultIssue
+                        )
+                    } else {
+                        self.ledger.incrementFailureCount(relativePath: relativePath, genID: genID)
+                        self.log("Encryption Error: \(error.localizedDescription)")
                     }
                 } catch {
-                    self.log("Upload/Copy Failed: \(error.localizedDescription)")
+                    self.ledger.incrementFailureCount(relativePath: relativePath, genID: genID)
                     
-                    if (error as NSError).domain == NSCocoaErrorDomain {
+                    let failureCount = self.ledger.getFailureCount(relativePath: relativePath)
+                    self.log("Upload/Copy Failed (\(failureCount)/3): \(error.localizedDescription)")
+                    
+                    if failureCount >= 3 {
+                        await MainActor.run {
+                            self.log("File '\(fileURL.lastPathComponent)' has reached max retry limit. Will skip future attempts.")
+                        }
+                        NotificationManager.shared.send(
+                            title: "Upload Failed",
+                            body: "'\(fileURL.lastPathComponent)' failed 3 times and will be skipped. Check logs.",
+                            type: .vaultIssue
+                        )
+                    } else if (error as NSError).domain == NSCocoaErrorDomain {
                         NotificationManager.shared.send(
                             title: "Vault Error",
                             body: "Failed to save file. Check your connection.",

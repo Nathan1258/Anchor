@@ -510,9 +510,17 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
                 
                 Task {
+                    await TransferQueue.shared.enqueue()
+                    
                     var finalSource = tempFileURL
-                            var finalRelativePath = relativePath
-                            var wasEncrypted = false
+                    var finalRelativePath = relativePath
+                    var wasEncrypted = false
+                    
+                    defer {
+                        Task {
+                            await TransferQueue.shared.taskFinished()
+                        }
+                    }
                     
                     do {
                         let preparation = try await CryptoManager.shared.prepareFileForUpload(source: tempFileURL)

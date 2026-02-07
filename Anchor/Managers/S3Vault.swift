@@ -50,21 +50,44 @@ final class S3Vault: VaultProvider {
     }
     
     func cleanupOrphanedMultipartUploads() async throws {
-        let input = ListMultipartUploadsInput(bucket: self.bucket)
-        let output = try await client.listMultipartUploads(input: input)
+        var keyMarker: String? = nil
+        var uploadIdMarker: String? = nil
+        var totalCleaned = 0
         
-        guard let uploads = output.uploads else { return }
-        
-        for upload in uploads {
-            if let initiated = upload.initiated,
-               Date().timeIntervalSince(initiated) > 86400,
-               let key = upload.key,
-               let uploadId = upload.uploadId {
-                
-                print("🧹 Aborting ghost upload: \(key)")
-                let abortInput = AbortMultipartUploadInput(bucket: self.bucket, key: key, uploadId: uploadId)
-                _ = try await client.abortMultipartUpload(input: abortInput)
+        repeat {
+            let input = ListMultipartUploadsInput(
+                bucket: self.bucket,
+                keyMarker: keyMarker,
+                uploadIdMarker: uploadIdMarker
+            )
+            let output = try await client.listMultipartUploads(input: input)
+            
+            if let uploads = output.uploads {
+                for upload in uploads {
+                    if let initiated = upload.initiated,
+                       Date().timeIntervalSince(initiated) > 86400,
+                       let key = upload.key,
+                       let uploadId = upload.uploadId {
+                        
+                        print("🧹 Aborting ghost upload: \(key)")
+                        let abortInput = AbortMultipartUploadInput(bucket: self.bucket, key: key, uploadId: uploadId)
+                        _ = try await client.abortMultipartUpload(input: abortInput)
+                        totalCleaned += 1
+                    }
+                }
             }
+            
+            keyMarker = output.nextKeyMarker
+            uploadIdMarker = output.nextUploadIdMarker
+            
+            if output.isTruncated == false {
+                break
+            }
+            
+        } while keyMarker != nil || uploadIdMarker != nil
+        
+        if totalCleaned > 0 {
+            print("✅ Cleaned up \(totalCleaned) orphaned multipart uploads")
         }
     }
     

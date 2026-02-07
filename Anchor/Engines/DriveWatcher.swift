@@ -718,6 +718,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             
             await TransferQueue.shared.enqueue()
             
+            defer {
+                Task {
+                    await TransferQueue.shared.taskFinished()
+                }
+            }
+            
             await performWithActivity("Uploading \(fileURL)"){
                 var uploadSource = tempSnapshotURL
                 var uploadPath = self.getVaultPath(for: relativePath)
@@ -830,8 +836,6 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 
                 CryptoManager.shared.cleanup(url: uploadSource, wasEncrypted: wasEncrypted)
             }
-            
-            await TransferQueue.shared.taskFinished()
         }
     }
     

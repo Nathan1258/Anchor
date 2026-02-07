@@ -185,30 +185,45 @@ struct RestoreBrowserView: View {
             if let result = downloadResult {
                  switch result {
                  case .success(let url):
-                     do {
-                         try FileManager.default.createDirectory(at: localFileDest.deletingLastPathComponent(), withIntermediateDirectories: true)
-                         
-                         if FileManager.default.fileExists(atPath: localFileDest.path) {
-                             try FileManager.default.removeItem(at: localFileDest)
+                     let sourceURL = url
+                     let destURL = localFileDest
+                     let encrypted = isEncrypted
+                     let path = relativePath
+                     
+                     let success = await Task.detached {
+                         do {
+                             try FileManager.default.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                             
+                             if FileManager.default.fileExists(atPath: destURL.path) {
+                                 try FileManager.default.removeItem(at: destURL)
+                             }
+                             
+                             if encrypted {
+                                 try CryptoManager.shared.decryptFile(source: sourceURL, dest: destURL)
+                             } else {
+                                 try FileManager.default.moveItem(at: sourceURL, to: destURL)
+                             }
+                             
+                             return true
+                         } catch {
+                             print("💥 Processing Error for \(path): \(error)")
+                             
+                             if FileManager.default.fileExists(atPath: destURL.path) {
+                                 try? FileManager.default.removeItem(at: destURL)
+                                 print("🗑️  Removed corrupt file: \(destURL.lastPathComponent)")
+                             }
+                             
+                             return false
                          }
-                         
-                         if isEncrypted {
-                             try CryptoManager.shared.decryptFile(source: url, dest: localFileDest)
-                         } else {
-                             try FileManager.default.moveItem(at: url, to: localFileDest)
-                         }
+                     }.value
+                     
+                     try? FileManager.default.removeItem(at: url)
+                     
+                     if success {
                          successCount += 1
-                     } catch {
-                         print("💥 Processing Error for \(relativePath): \(error)")
-                         
-                         if FileManager.default.fileExists(atPath: localFileDest.path) {
-                             try? FileManager.default.removeItem(at: localFileDest)
-                             print("🗑️  Removed corrupt file: \(localFileDest.lastPathComponent)")
-                         }
-                         
+                     } else {
                          failCount += 1
                      }
-                     try? FileManager.default.removeItem(at: url)
                      
                  case .failure:
                      failCount += 1

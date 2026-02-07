@@ -702,11 +702,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordError: NSError?
         
-        let tempSnapshotURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let tempSnapshotURL = createSnapshotDirectory(for: fileURL)
+        let snapshotFile = tempSnapshotURL.appendingPathComponent(fileURL.lastPathComponent)
         
         coordinator.coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &coordError) { safeURL in
             do {
-                try FileManager.default.copyItem(at: safeURL, to: tempSnapshotURL)
+                try FileManager.default.createDirectory(at: tempSnapshotURL, withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: safeURL, to: snapshotFile)
             } catch {
                 print("❌ Failed to snapshot file: \(error)")
                 return
@@ -725,13 +727,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             }
             
             await performWithActivity("Uploading \(fileURL)"){
-                var uploadSource = tempSnapshotURL
+                var uploadSource = snapshotFile
                 var uploadPath = self.getVaultPath(for: relativePath)
                 var wasEncrypted = false
                 
                 
                 do {
-                    let preparation = try CryptoManager.shared.prepareFileForUpload(source: tempSnapshotURL)
+                    let preparation = try CryptoManager.shared.prepareFileForUpload(source: snapshotFile)
                     uploadSource = preparation.url
                     wasEncrypted = preparation.isEncrypted
                     
@@ -774,7 +776,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                         DispatchQueue.main.async {
                             NotificationManager.shared.send(
                                 title: "Backup Failed: Disk Full",
-                                body: "Anchor requires \(sizeStr) to back up '\(tempSnapshotURL.lastPathComponent)'. Sync has been paused.",
+                                body: "Anchor requires \(sizeStr) to back up '\(snapshotFile.lastPathComponent)'. Sync has been paused.",
                                 type: .vaultIssue
                             )
                         }
@@ -798,7 +800,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                             self.status = .disabled
                         }
                         
-                        let sourceSize = (try? tempSnapshotURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        let sourceSize = (try? snapshotFile.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                         let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(sourceSize), countStyle: .file)
                         
                         NotificationManager.shared.send(

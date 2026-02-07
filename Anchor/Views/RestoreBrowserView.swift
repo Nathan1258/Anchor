@@ -113,6 +113,8 @@ struct RestoreBrowserView: View {
                 
                 try? FileManager.default.createDirectory(at: restoreRoot, withIntermediateDirectories: true)
                 
+                ExclusionManager.shared.addTemporaryExclusion(path: restoreRoot.path)
+                
                 Task {
                     await self.executeRestore(to: restoreRoot)
                 }
@@ -199,18 +201,18 @@ struct RestoreBrowserView: View {
                              }
                              
                              if encrypted {
-                                 try CryptoManager.shared.decryptFile(source: sourceURL, dest: destURL)
+                                 try await CryptoManager.shared.decryptFile(source: sourceURL, dest: destURL)
                              } else {
                                  try FileManager.default.moveItem(at: sourceURL, to: destURL)
                              }
                              
                              return true
                          } catch {
-                             print("💥 Processing Error for \(path): \(error)")
+                             print("Processing Error for \(path): \(error)")
                              
                              if FileManager.default.fileExists(atPath: destURL.path) {
                                  try? FileManager.default.removeItem(at: destURL)
-                                 print("🗑️  Removed corrupt file: \(destURL.lastPathComponent)")
+                                 print("Removed corrupt file: \(destURL.lastPathComponent)")
                              }
                              
                              return false
@@ -233,9 +235,11 @@ struct RestoreBrowserView: View {
         
         await MainActor.run {
             self.isRestoring = false
-            let message = "Restored \(successCount) files." + (failCount > 0 ? " (\(failCount) failed)" : "")
+            let message = "Restored \(successCount) files." + (failCount > 0 ? " (\(failCount) failed)" : "") + "\n\nNote: This folder is excluded from future backups to prevent duplication."
             NotificationManager.shared.send(title: "Restore Complete", body: message, type: .backupComplete)
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: destination.path)
+            
+            print("ℹ️ Restore folder remains excluded: \(destination.path)")
         }
     }
 }

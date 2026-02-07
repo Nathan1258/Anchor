@@ -247,24 +247,24 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     }
     
     private func processDelta(_ changes: PHPersistentChangeFetchResult) {
-        exportQueue.async {
+        Task {
             let activity = ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiated, .idleSystemSleepDisabled],
                 reason: "Processing Photo Batch"
             )
             defer { ProcessInfo.processInfo.endActivity(activity) }
             
-            let isNetworkReady = DispatchQueue.main.sync {
+            let isNetworkReady = await MainActor.run {
                 return NetworkMonitor.shared.status == .verified
             }
             
             if !isNetworkReady {
                 self.log("Network unavailable. Skipping photo sync (will retry).")
-                DispatchQueue.main.async { self.status = .paused }
+                await MainActor.run { self.status = .paused }
                 return
             }
             
-            let shouldContinue = DispatchQueue.main.sync {
+            let shouldContinue = await MainActor.run {
                 if PersistenceManager.shared.isGlobalPaused {
                     self.status = .paused
                     return false
@@ -279,7 +279,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             
             for change in changes {
                 if PersistenceManager.shared.isGlobalPaused {
-                    DispatchQueue.main.async { self.status = .paused }
+                    await MainActor.run { self.status = .paused }
                     break
                 }
                 
@@ -289,16 +289,19 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     let inserted = details.insertedLocalIdentifiers
                     if !inserted.isEmpty {
                         let assets = PHAsset.fetchAssets(withLocalIdentifiers: Array(inserted), options: nil)
+                        
+                        var assetsToProcess: [PHAsset] = []
                         assets.enumerateObjects { asset, _, stop in
                             if !PersistenceManager.shared.isPhotosEnabled {
                                 stop.pointee = true
                                 return
                             }
-                            
-                            autoreleasepool {
-                                self.exportAsset(asset, forceOverwrite: false)
-                                addedCount += 1
-                            }
+                            assetsToProcess.append(asset)
+                        }
+                        
+                        for asset in assetsToProcess {
+                            await self.exportAssetAsync(asset, forceOverwrite: false)
+                            addedCount += 1
                         }
                     }
                     if PersistenceManager.shared.isPhotosEnabled {
@@ -311,7 +314,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
             }
             
-            DispatchQueue.main.async {
+            await MainActor.run {
                 self.isProcessing = false
                 if PersistenceManager.shared.isPhotosEnabled {
                     if addedCount > 0 || updatedCount > 0 {
@@ -386,40 +389,58 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         log("First Run: Scanning entire library...")
         
-        exportQueue.async {
+        Task {
             guard PersistenceManager.shared.isPhotosEnabled else { return }
             
             let options = PHFetchOptions()
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
             let allAssets = PHAsset.fetchAssets(with: options)
             
-            DispatchQueue.main.async {
+            await MainActor.run {
                 self.totalLibraryCount = allAssets.count
                 self.log("Found \(allAssets.count) items. Starting Backup...")
             }
             
-            allAssets.enumerateObjects { (asset, index, stop) in
-                let shouldStop = DispatchQueue.main.sync {
+            let batchSize = 50
+            var processedCount = 0
+            
+            while processedCount < allAssets.count {
+                let shouldStop = await MainActor.run {
                     self.status == .waitingForVault || !PersistenceManager.shared.isPhotosEnabled
                 }
                 
                 if shouldStop {
-                    stop.pointee = true
-                    return
+                    break
                 }
                 
-                if index % 10 == 0 {
-                    DispatchQueue.main.async {
-                        self.status = .processing(current: index, total: allAssets.count)
+                let batchEnd = min(processedCount + batchSize, allAssets.count)
+                let batchAssets = (processedCount..<batchEnd).compactMap { allAssets.object(at: $0) }
+                
+                await withTaskGroup(of: Void.self) { group in
+                    for (localIndex, asset) in batchAssets.enumerated() {
+                        let globalIndex = processedCount + localIndex
+                        
+                        group.addTask {
+                            await self.exportAssetAsync(asset)
+                        }
+                        
+                        if globalIndex % 10 == 0 {
+                            await MainActor.run {
+                                self.status = .processing(current: globalIndex, total: allAssets.count)
+                            }
+                        }
                     }
+                    
+                    await group.waitForAll()
                 }
-                self.exportAsset(asset)
+                
+                processedCount = batchEnd
             }
             
             let currentToken = PHPhotoLibrary.shared().currentChangeToken
             PersistenceManager.shared.savePhotoToken(currentToken)
             
-            DispatchQueue.main.async {
+            await MainActor.run {
                 self.isProcessing = false
                 self.status = .backupComplete
                 self.log("Full Scan Complete. Token Saved.")
@@ -598,6 +619,135 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 
                 if !results.errors.isEmpty {
                     self.log("Issues saving asset components: \(results.errors.joined(separator: ", "))")
+                }
+            }
+        }
+    }
+    
+    private func exportAssetAsync(_ asset: PHAsset, forceOverwrite: Bool = false) async {
+        guard let provider = vaultProvider else { return }
+        
+        await MainActor.run {
+            self.lastPhotoProcessed = "Processing..."
+        }
+        
+        let date = asset.creationDate ?? Date()
+        let calendar = Calendar.current
+        let year = String(calendar.component(.year, from: date))
+        let month = String(format: "%02d", calendar.component(.month, from: date))
+        
+        let resources = PHAssetResource.assetResources(for: asset)
+        
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        
+        var savedFilenames: [String] = []
+        
+        for resource in resources {
+            let filename = resource.originalFilename
+            let prefix = PersistenceManager.shared.photoVaultType == .s3 ? "photos/" : ""
+            let relativePath = "\(prefix)\(year)/\(month)/\(filename)"
+            let tempFileURL = tempDir.appendingPathComponent(filename)
+            
+            let options = PHAssetResourceRequestOptions()
+            options.isNetworkAccessAllowed = true
+            
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                PHAssetResourceManager.default().writeData(for: resource, toFile: tempFileURL, options: options) { error in
+                    if let error {
+                        Task { @MainActor in
+                            self.log("Failed: \(filename) - \(error.localizedDescription)")
+                        }
+                        
+                        if (error as NSError).domain == NSCocoaErrorDomain && (error as NSError).code == 4 {
+                            NotificationManager.shared.send(
+                                title: "Vault Disconnected",
+                                body: "Could not write to Photo Vault. Please check your drive connection.",
+                                type: .vaultIssue
+                            )
+                        }
+                        continuation.resume()
+                        return
+                    }
+                    continuation.resume()
+                }
+            }
+            
+            await TransferQueue.shared.enqueue()
+            
+            defer {
+                Task {
+                    await TransferQueue.shared.taskFinished()
+                }
+            }
+            
+            var finalSource = tempFileURL
+            var finalRelativePath = relativePath
+            var wasEncrypted = false
+            
+            do {
+                let preparation = try CryptoManager.shared.prepareFileForUpload(source: tempFileURL)
+                finalSource = preparation.url
+                wasEncrypted = preparation.isEncrypted
+                
+                if wasEncrypted {
+                    finalRelativePath += ".anchor"
+                }
+                
+                let exists = await provider.fileExists(relativePath: finalRelativePath)
+                
+                if !exists {
+                    try await provider.saveFile(source: finalSource, relativePath: finalRelativePath) { [weak self] in
+                        guard let self = self else { return true }
+                        
+                        if !self.isRunning { return true }
+                        
+                        if !PersistenceManager.shared.isDriveEnabled { return true }
+                        
+                        if PersistenceManager.shared.isGlobalPaused { return true }
+                        
+                        return false
+                    }
+                    savedFilenames.append(filename)
+                }
+                
+            } catch let error as CryptoError {
+                if case .insufficientDiskSpace = error {
+                    await MainActor.run {
+                        self.log("Encryption Failed: Insufficient disk space for '\(filename)'.")
+                        self.status = .paused
+                    }
+                    
+                    NotificationManager.shared.send(
+                        title: "Photo Encryption Failed",
+                        body: "Not enough disk space to encrypt photos. Free up space to continue.",
+                        type: .vaultIssue
+                    )
+                } else {
+                    await MainActor.run {
+                        self.log("Encryption Error: \(filename) - \(error.localizedDescription)")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.log("Upload Failed: \(filename) - \(error.localizedDescription)")
+                }
+            }
+            
+            CryptoManager.shared.cleanup(url: finalSource, wasEncrypted: wasEncrypted)
+            try? FileManager.default.removeItem(at: tempFileURL)
+        }
+        
+        try? FileManager.default.removeItem(at: tempDir)
+        
+        if !savedFilenames.isEmpty {
+            await MainActor.run {
+                self.sessionSavedCount += 1
+                self.lastSyncTime = Date()
+                
+                if let primeFile = savedFilenames.first {
+                    self.lastPhotoProcessed = primeFile
+                    self.log(forceOverwrite ? "Updated: \(primeFile)" : "Saved: \(primeFile) (+ components)")
                 }
             }
         }

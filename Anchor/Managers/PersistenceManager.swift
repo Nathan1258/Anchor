@@ -34,6 +34,7 @@ class PersistenceManager: ObservableObject {
     
     private let kIgnoredExtensions = "anchor_ignore_ext"
     private let kIgnoredFolders = "anchor_ignore_folders"
+    private let kIgnoredPaths = "anchor_ignore_paths"
     
     private let kPausedUntil = "anchor_paused_until"
     
@@ -170,6 +171,11 @@ class PersistenceManager: ObservableObject {
     var ignoredFolders: [String] {
         get { defaults.stringArray(forKey: kIgnoredFolders) ?? [] }
         set { objectWillChange.send(); defaults.set(newValue, forKey: kIgnoredFolders) }
+    }
+    
+    var ignoredPaths: [String] {
+        get { defaults.stringArray(forKey: kIgnoredPaths) ?? [] }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kIgnoredPaths) }
     }
     
     var notifyBackupComplete: Bool {

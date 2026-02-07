@@ -18,7 +18,7 @@ class RestoreBrowserViewModel: ObservableObject {
         return currentPath.split(separator: "/").map(String.init)
     }
     
-    private let ledger = SQLiteLedger()
+    private let ledger = SQLiteLedger.shared
     
     init() {
         loadContent()

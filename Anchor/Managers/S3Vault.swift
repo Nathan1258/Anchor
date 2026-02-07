@@ -318,7 +318,7 @@ final class S3Vault: VaultProvider {
         let calculatedPartSize = max(MIN_PART_SIZE, fileSize / 10000)
         let totalParts = Int(ceil(Double(fileSize) / Double(calculatedPartSize)))
         
-        let ledger = SQLiteLedger()
+        let ledger = SQLiteLedger.shared
         var uploadID = ledger.getActiveUploadID(relativePath: safeKey)
         
         if uploadID == nil {

@@ -28,6 +28,8 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     private let exportQueue = DispatchQueue(label: "com.anchor.photoExport", qos: .utility)
     private var cancellables = Set<AnyCancellable>()
+    private var scheduleTimer: AnyCancellable?
+    private var lastScheduledScan: Date?
     
     override init() {
         super.init()
@@ -144,6 +146,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     }
                     
                     self.requestPhotoAccess()
+                    self.setupScheduleTimer()
                 }
                 
             } catch {
@@ -153,6 +156,29 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
             }
         }
+    }
+    
+    private func setupScheduleTimer() {
+        scheduleTimer?.cancel()
+        
+        guard PersistenceManager.shared.photosScheduleMode == BackupScheduleMode.scheduled else {
+            log("Realtime mode active - changes will be backed up immediately")
+            return
+        }
+        
+        let intervalMinutes = PersistenceManager.shared.photosScheduleInterval.rawValue
+        log("Scheduled mode active - will scan every \(intervalMinutes) minutes")
+        
+        scheduleTimer = Timer.publish(every: TimeInterval(intervalMinutes * 60), on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                guard PersistenceManager.shared.isPhotosEnabled else { return }
+                guard !PersistenceManager.shared.isGlobalPaused else { return }
+                
+                self.log("Scheduled backup starting...")
+                self.checkForChanges()
+            }
     }
     
     private func requestPhotoAccess() {
@@ -457,8 +483,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     func photoLibraryDidChange(_ changeInstance: PHChange) {
         guard PersistenceManager.shared.isPhotosEnabled else { return }
         
-        DispatchQueue.main.async {
-            self.checkForChanges()
+        if PersistenceManager.shared.photosScheduleMode == BackupScheduleMode.realtime {
+            DispatchQueue.main.async {
+                self.checkForChanges()
+            }
+        } else {
+            log("Photo library changed (scheduled mode) - will backup on next schedule")
         }
     }
     

@@ -34,7 +34,7 @@ class ReIndexManager: ObservableObject {
                 
                 await MainActor.run { statusMessage = "Importing \(allPaths.count) items..." }
                 
-                let ledger = SQLiteLedger()
+                let ledger = SQLiteLedger.shared
                 
                 ledger.wipe() 
                 

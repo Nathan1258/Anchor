@@ -21,6 +21,8 @@ class PersistenceManager: ObservableObject {
     private let kVaultBookmark = "anchor_vault_bookmark"
     private let kPhotoVaultBookmark = "anchor_photo_vault_bookmark"
     private let kPhotoChangeToken = "anchor_photo_change_token"
+    private let kDesktopBookmark = "anchor_desktop_bookmark"
+    private let kDocumentsBookmark = "anchor_documents_bookmark"
     
     private let kBackupMode = "anchor_backup_mode"
     private let kSnapshotFrequency = "anchor_snapshot_freq"
@@ -39,6 +41,11 @@ class PersistenceManager: ObservableObject {
     private let kPausedUntil = "anchor_paused_until"
     
     private let kS3SecretKey = "anchor_s3_secret_key"
+    
+    private let kDriveScheduleMode = "anchor_drive_schedule_mode"
+    private let kDriveScheduleInterval = "anchor_drive_schedule_interval"
+    private let kPhotosScheduleMode = "anchor_photos_schedule_mode"
+    private let kPhotosScheduleInterval = "anchor_photos_schedule_interval"
     
     
     var backupMode: BackupMode {
@@ -194,6 +201,50 @@ class PersistenceManager: ObservableObject {
         }
     }
     
+    var driveScheduleMode: BackupScheduleMode {
+        get {
+            let raw = defaults.integer(forKey: kDriveScheduleMode)
+            return BackupScheduleMode(rawValue: raw) ?? .realtime
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue.rawValue, forKey: kDriveScheduleMode)
+        }
+    }
+    
+    var driveScheduleInterval: BackupScheduleInterval {
+        get {
+            let raw = defaults.integer(forKey: kDriveScheduleInterval)
+            return BackupScheduleInterval(rawValue: raw) ?? .hourly
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue.rawValue, forKey: kDriveScheduleInterval)
+        }
+    }
+    
+    var photosScheduleMode: BackupScheduleMode {
+        get {
+            let raw = defaults.integer(forKey: kPhotosScheduleMode)
+            return BackupScheduleMode(rawValue: raw) ?? .realtime
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue.rawValue, forKey: kPhotosScheduleMode)
+        }
+    }
+    
+    var photosScheduleInterval: BackupScheduleInterval {
+        get {
+            let raw = defaults.integer(forKey: kPhotosScheduleInterval)
+            return BackupScheduleInterval(rawValue: raw) ?? .hourly
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue.rawValue, forKey: kPhotosScheduleInterval)
+        }
+    }
+    
     
     func savePhotoToken(_ token: PHPersistentChangeToken) {
         do {
@@ -224,9 +275,21 @@ class PersistenceManager: ObservableObject {
             case .driveSource: defaults.set(data, forKey: kSourceBookmark)
             case .driveVault: defaults.set(data, forKey: kVaultBookmark)
             case .photoVault: defaults.set(data, forKey: kPhotoVaultBookmark)
+            case .desktopFolder: defaults.set(data, forKey: kDesktopBookmark)
+            case .documentsFolder: defaults.set(data, forKey: kDocumentsBookmark)
             }
         } catch {
             print("Failed to save bookmark: \(error)")
+        }
+    }
+    
+    func clearBookmark(type: BookmarkType) {
+        switch type {
+        case .driveSource: defaults.removeObject(forKey: kSourceBookmark)
+        case .driveVault: defaults.removeObject(forKey: kVaultBookmark)
+        case .photoVault: defaults.removeObject(forKey: kPhotoVaultBookmark)
+        case .desktopFolder: defaults.removeObject(forKey: kDesktopBookmark)
+        case .documentsFolder: defaults.removeObject(forKey: kDocumentsBookmark)
         }
     }
     
@@ -237,6 +300,8 @@ class PersistenceManager: ObservableObject {
         case .driveSource: key = kSourceBookmark
         case .driveVault: key = kVaultBookmark
         case .photoVault: key = kPhotoVaultBookmark
+        case .desktopFolder: key = kDesktopBookmark
+        case .documentsFolder: key = kDocumentsBookmark
         }
         
         guard let data = defaults.data(forKey: key) else { return nil }
@@ -262,5 +327,7 @@ class PersistenceManager: ObservableObject {
         case driveSource
         case driveVault
         case photoVault
+        case desktopFolder
+        case documentsFolder
     }
 }

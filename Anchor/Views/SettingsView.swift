@@ -15,6 +15,7 @@ struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     @ObservedObject var exclusionManager = ExclusionManager.shared
     
+    @State private var selectedTab: Int = 0
     @State private var newExtension = ""
     @State private var newFolder = ""
     @State private var tempS3Config = PersistenceManager.shared.s3Config
@@ -47,6 +48,8 @@ struct SettingsView: View {
     
     @State private var showDriveEnableAlert = false
     @State private var showPhotosEnableAlert = false
+    @State private var showDesktopUnlinkAlert = false
+    @State private var showDocumentsUnlinkAlert = false
     
     @State private var pendingEnableType: PendingEnableType?
     
@@ -62,7 +65,7 @@ struct SettingsView: View {
     }
     
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             generalTab
             cloudTab
             driveTab
@@ -71,6 +74,11 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 800, height: 400)
+        .onReceive(NotificationCenter.default.publisher(for: .openSettingsTab)) { notification in
+            if let tabIndex = notification.object as? Int {
+                selectedTab = tabIndex
+            }
+        }
         .onChange(of: persistence.notifyBackupComplete) {
             if persistence.notifyBackupComplete {
                 NotificationManager.shared.requestPermissions()
@@ -202,7 +210,8 @@ struct SettingsView: View {
                     get: { persistence.isDriveEnabled },
                     set: { newValue in
                         if newValue {
-                            attemptToEnable(type: .drive)
+                            persistence.isDriveEnabled = true
+                            driveWatcher.startWatching()
                         } else {
                             showDriveWipeAlert = true
                         }
@@ -217,6 +226,7 @@ struct SettingsView: View {
                 driveSourceSection
                 driveDestinationSection
                 driveBackupStrategySection
+                driveScheduleSection
                 driveExclusionsSection
             }
             .disabled(!persistence.isDriveEnabled)
@@ -249,17 +259,109 @@ struct SettingsView: View {
         } message: {
             Text("Do you want to keep the files currently in your Vault, or delete them?")
         }
+        .alert("Unlink Desktop Folder?", isPresented: $showDesktopUnlinkAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Unlink") {
+                unlinkDesktopFolder()
+            }
+        } message: {
+            Text("Desktop folder will be unlinked, but your main iCloud Drive folder will continue to sync.")
+        }
+        .alert("Unlink Documents Folder?", isPresented: $showDocumentsUnlinkAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Unlink") {
+                unlinkDocumentsFolder()
+            }
+        } message: {
+            Text("Documents folder will be unlinked, but your main iCloud Drive folder will continue to sync.")
+        }
         .disabled(isWiping)
     }
     
     private var driveSourceSection: some View {
-        Section(header: Text("Source")) {
+        Section(
+            header: Text("Source"),
+            footer: Group {
+                if let sourceURL = driveWatcher.sourceURL,
+                   sourceURL.path.contains("Mobile Documents") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("ℹ️ Optional: Desktop & Documents Folders")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Text("These special iCloud Drive folders require separate permissions. If you want to back them up, select them below. They will be synced in addition to your main source folder.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        ) {
             PathPickerRow(
                 label: "Source Folder",
                 path: driveWatcher.sourceURL,
                 icon: "icloud",
                 action: driveWatcher.selectSourceFolder
             )
+            
+            // Show Desktop and Documents options if source is iCloud Drive
+            if let sourceURL = driveWatcher.sourceURL,
+               sourceURL.path.contains("Mobile Documents") {
+                
+                // Desktop folder
+                HStack {
+                    Image(systemName: "desktopcomputer")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
+                    
+                    Text("Desktop (Optional)")
+                    
+                    Spacer()
+                    
+                    if driveWatcher.desktopURL != nil {
+                        Text("Setup")
+                            .foregroundStyle(.green)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        
+                        Button(action: { showDesktopUnlinkAlert = true }) {
+                            Text("Unlink")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                    } else {
+                        Button("Select...", action: driveWatcher.selectDesktopFolder)
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.vertical, 4)
+                
+                // Documents folder
+                HStack {
+                    Image(systemName: "doc.on.doc")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
+                    
+                    Text("Documents (Optional)")
+                    
+                    Spacer()
+                    
+                    if driveWatcher.documentsURL != nil {
+                        Text("Setup")
+                            .foregroundStyle(.green)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        
+                        Button(action: { showDocumentsUnlinkAlert = true }) {
+                            Text("Unlink")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                    } else {
+                        Button("Select...", action: driveWatcher.selectDocumentsFolder)
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
         }
     }
     
@@ -306,6 +408,43 @@ struct SettingsView: View {
             }
         } message: {
             Text("Switching vaults requires a full re-scan to ensure all files are safe.\n\nAnchor will forget previous sync history and verify your library against the new destination.")
+        }
+    }
+    
+    private var driveScheduleSection: some View {
+        Section(
+            header: Text("Backup Schedule"),
+            footer: Text(persistence.driveScheduleMode == .realtime ? 
+                        "Changes are backed up immediately when detected" : 
+                        "Changes are backed up on a regular schedule")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        ) {
+            Picker("Mode", selection: $persistence.driveScheduleMode) {
+                Text("Realtime").tag(BackupScheduleMode.realtime)
+                Text("Scheduled").tag(BackupScheduleMode.scheduled)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: persistence.driveScheduleMode) { _, _ in
+                // Restart watcher to apply new schedule
+                if driveWatcher.isRunning {
+                    driveWatcher.startWatching()
+                }
+            }
+            
+            if persistence.driveScheduleMode == .scheduled {
+                Picker("Interval", selection: $persistence.driveScheduleInterval) {
+                    ForEach(BackupScheduleInterval.allCases) { interval in
+                        Text(interval.label).tag(interval)
+                    }
+                }
+                .onChange(of: persistence.driveScheduleInterval) { _, _ in
+                    // Restart watcher to apply new interval
+                    if driveWatcher.isRunning {
+                        driveWatcher.startWatching()
+                    }
+                }
+            }
         }
     }
     
@@ -489,6 +628,43 @@ struct SettingsView: View {
     
     // MARK: - Photos Tab
     
+    private var photosScheduleSection: some View {
+        Section(
+            header: Text("Backup Schedule"),
+            footer: Text(persistence.photosScheduleMode == .realtime ? 
+                        "Changes are backed up immediately when detected" : 
+                        "Changes are backed up on a regular schedule")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        ) {
+            Picker("Mode", selection: $persistence.photosScheduleMode) {
+                Text("Realtime").tag(BackupScheduleMode.realtime)
+                Text("Scheduled").tag(BackupScheduleMode.scheduled)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: persistence.photosScheduleMode) { _, _ in
+                // Restart watcher to apply new schedule
+                if photoWatcher.isRunning {
+                    photoWatcher.startWatching()
+                }
+            }
+            
+            if persistence.photosScheduleMode == .scheduled {
+                Picker("Interval", selection: $persistence.photosScheduleInterval) {
+                    ForEach(BackupScheduleInterval.allCases) { interval in
+                        Text(interval.label).tag(interval)
+                    }
+                }
+                .onChange(of: persistence.photosScheduleInterval) { _, _ in
+                    // Restart watcher to apply new interval
+                    if photoWatcher.isRunning {
+                        photoWatcher.startWatching()
+                    }
+                }
+            }
+        }
+    }
+    
     private var photosTab: some View {
         Form {
             Section {
@@ -496,7 +672,7 @@ struct SettingsView: View {
                     get: { persistence.isPhotosEnabled },
                     set: { newValue in
                         if newValue {
-                            photoWatcher.startWatching()
+                            attemptToEnable(type: .photos)
                         } else {
                             showPhotosWipeAlert = true
                         }
@@ -558,6 +734,8 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                
+                photosScheduleSection
             }
             .disabled(!persistence.isPhotosEnabled)
         }
@@ -660,6 +838,8 @@ struct SettingsView: View {
                 let tester = try await S3Vault.create(config: tempS3Config)
                 try await tester.testConnection()
                 
+                SQLiteLedger.shared.resetAllFailureCounts()
+                
                 DispatchQueue.main.async {
                     self.connectionTestSuccess = true
                     self.connectionTestMessage = "Connection Successful! Write access confirmed."
@@ -681,6 +861,9 @@ struct SettingsView: View {
         Task {
             do {
                 let provider = try await S3Vault.create(config: tempS3Config)
+                
+                SQLiteLedger().resetAllFailureCounts()
+                
                 await processVaultHandshake(provider: provider, type: .s3, url: nil)
             } catch {
                 connectionTestMessage = "Failed: \(error.localizedDescription)"
@@ -787,6 +970,22 @@ struct SettingsView: View {
         driveWatcher.status = .disabled
         driveWatcher.isRunning = false
         
+        // Clear all Drive configuration
+        driveWatcher.sourceURL?.stopAccessingSecurityScopedResource()
+        driveWatcher.sourceURL = nil
+        driveWatcher.vaultURL?.stopAccessingSecurityScopedResource()
+        driveWatcher.vaultURL = nil
+        driveWatcher.desktopURL?.stopAccessingSecurityScopedResource()
+        driveWatcher.desktopURL = nil
+        driveWatcher.documentsURL?.stopAccessingSecurityScopedResource()
+        driveWatcher.documentsURL = nil
+        
+        // Clear bookmarks
+        persistence.clearBookmark(type: .driveSource)
+        persistence.clearBookmark(type: .driveVault)
+        persistence.clearBookmark(type: .desktopFolder)
+        persistence.clearBookmark(type: .documentsFolder)
+        
         if wipe {
             isWiping = true
             Task {
@@ -795,7 +994,7 @@ struct SettingsView: View {
                     try? await provider.wipe(prefix: prefix)
                 }
                 
-                SQLiteLedger().wipe()
+                SQLiteLedger.shared.wipe()
                 
                 await MainActor.run { isWiping = false }
             }
@@ -818,6 +1017,13 @@ struct SettingsView: View {
         photoWatcher.status = .disabled
         photoWatcher.isRunning = false
         persistence.clearPhotoToken()
+        
+        // Clear photo vault configuration
+        photoWatcher.vaultURL?.stopAccessingSecurityScopedResource()
+        photoWatcher.vaultURL = nil
+        
+        // Clear bookmark
+        persistence.clearBookmark(type: .photoVault)
         
         if wipe {
             isWiping = true
@@ -857,6 +1063,18 @@ struct SettingsView: View {
                 enablePhotos(uploadAll: true)
             }
         }
+    }
+    
+    func unlinkDesktopFolder() {
+        driveWatcher.desktopURL?.stopAccessingSecurityScopedResource()
+        driveWatcher.desktopURL = nil
+        persistence.clearBookmark(type: .desktopFolder)
+    }
+    
+    func unlinkDocumentsFolder() {
+        driveWatcher.documentsURL?.stopAccessingSecurityScopedResource()
+        driveWatcher.documentsURL = nil
+        persistence.clearBookmark(type: .documentsFolder)
     }
         
     struct ExclusionToken: View {

@@ -7,8 +7,62 @@
 
 import SwiftUI
 
+class AppDelegate: NSObject, NSApplicationDelegate {
+    private var windowObservers: [NSObjectProtocol] = []
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        setupWindowObservers()
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        SQLiteLedger.shared.performCheckpoint()
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+    
+    private func setupWindowObservers() {
+        let didBecomeKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateActivationPolicy()
+        }
+        
+        let willCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self?.updateActivationPolicy()
+            }
+        }
+        
+        windowObservers = [didBecomeKeyObserver, willCloseObserver]
+    }
+    
+    private func updateActivationPolicy() {
+        let hasVisibleWindows = NSApp.windows.contains { window in
+            window.isVisible &&
+            (window.title == "Settings" || window.title == "Dashboard" || window.title == "Restore Browser")
+        }
+        
+        let newPolicy: NSApplication.ActivationPolicy = hasVisibleWindows ? .regular : .accessory
+        
+        if NSApp.activationPolicy() != newPolicy {
+            NSApp.setActivationPolicy(newPolicy)
+            
+            if newPolicy == .regular {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+}
+
 @main
 struct AnchorApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     @StateObject private var driveWatcher = DriveWatcher()
     @StateObject private var photosWatcher = PhotoWatcher()
@@ -27,14 +81,7 @@ struct AnchorApp: App {
                 if persistence.isGlobalPaused{
                     Image(systemName: "pause.circle")
                 }else{
-                    let image: NSImage = {
-                        let ratio = $0.size.height / $0.size.width
-                        $0.size.height = 32
-                        $0.size.width = 32 / ratio
-                        return $0
-                    }(NSImage(named: "MenuBarIcon")!)
-                    
-                    Image(nsImage: image)
+                    Image(nsImage: createMenuBarIcon())
                 }
             }
         }
@@ -55,6 +102,68 @@ struct AnchorApp: App {
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
+        
+        Window("Restore Browser", id: "restore") {
+            RestoreBrowserView()
+                .frame(minWidth: 800, minHeight: 600)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+    }
+    
+    private func getMenuBarStatusColor() -> NSColor {
+        if !persistence.isDriveEnabled && !persistence.isPhotosEnabled {
+            return .systemGray
+        }
+        
+        if driveWatcher.status == .scanning || photosWatcher.status == .scanning {
+            return .systemBlue
+        }
+        
+        if driveWatcher.isRunning || photosWatcher.isRunning {
+            return .systemGreen
+        }
+        
+        return .systemOrange
+    }
+    
+    private func createMenuBarIcon() -> NSImage {
+        guard let baseImage = NSImage(named: "MenuBarIcon") else {
+            return NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: nil)!
+        }
+        
+        let ratio = baseImage.size.height / baseImage.size.width
+        let targetHeight: CGFloat = 22
+        let targetWidth = targetHeight / ratio
+        
+        let finalSize = NSSize(width: targetWidth, height: targetHeight)
+        let finalImage = NSImage(size: finalSize)
+        
+        finalImage.lockFocus()
+        
+        baseImage.draw(in: NSRect(origin: .zero, size: finalSize))
+        
+        let statusColor = getMenuBarStatusColor()
+        let dotSize: CGFloat = 6
+        let dotRect = NSRect(
+            x: finalSize.width - dotSize - 1,
+            y: finalSize.height - dotSize - 1,
+            width: dotSize,
+            height: dotSize
+        )
+        
+        let path = NSBezierPath(ovalIn: dotRect)
+        statusColor.setFill()
+        path.fill()
+        
+        NSColor.black.withAlphaComponent(0.3).setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+        
+        finalImage.unlockFocus()
+        finalImage.isTemplate = false
+        
+        return finalImage
     }
 }
 
@@ -66,51 +175,68 @@ struct Main: View {
     
     @Environment(\.openWindow) var openWindow
     
-    var statusText: String {
+    var statusInfo: (text: String, color: Color, isActive: Bool) {
         if persistence.isGlobalPaused {
-            return "⛔️ Global Pause Active"
+            return ("Paused", .orange, false)
         }
         
         switch photosWatcher.status {
-        case .scanning: return "Photos: Scanning Library..."
-        case .processing(let current, let total): return "Photos: Processing \(current)/\(total)..."
-        case .checkingForChanges: return "Photos: Checking changes..."
-        case .synced(let count): return "Photos: Synced \(count) items"
+        case .scanning: return ("Scanning Photos", .blue, true)
+        case .processing(let current, let total): return ("Processing \(current)/\(total)", .blue, true)
+        case .checkingForChanges: return ("Checking Photos", .blue, true)
+        case .synced(let count) where count > 0: return ("\(count) Photo\(count == 1 ? "" : "s") Synced", .green, false)
         default: break
         }
         
         switch driveWatcher.status {
-        case .scanning: return "Drive: Smart Scanning..."
-        case .downloading(let filename): return "Drive: Downloading \(filename)..."
-        case .vaulted(let filename): return "Drive: Vaulted \(filename)"
-        case .deleted(let filename): return "Drive: Deleted \(filename)"
-        case .newItem: return "Drive: New Item Detected"
+        case .scanning: return ("Scanning Drive", .blue, true)
+        case .downloading(let filename): return ("Downloading \(filename)", .blue, true)
+        case .vaulted(let filename): return ("Backed up \(filename)", .green, true)
+        case .deleted(let filename): return ("Deleted \(filename)", .orange, true)
+        case .newItem: return ("New Item Detected", .blue, true)
+        case .active, .monitoring: return ("Monitoring", .green, true)
+        case .disabled: return ("Disabled", .gray, false)
+        case .paused: return ("Paused", .orange, false)
+        case .waitingForVault: return ("Waiting for Vault", .orange, false)
         default: break
         }
         
-        if driveWatcher.status == .active || driveWatcher.status == .monitoring {
-            return "Anchor is Active"
-        }
-        
-        return "Idle"
+        return ("Idle", .gray, false)
     }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             
-            HStack {
-                Circle()
-                    .fill(statusText == "Idle" ? Color.gray : Color.green)
-                    .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusInfo.color)
+                        .frame(width: 8, height: 8)
+                    
+                    Text(statusInfo.text)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    
+                    Spacer()
+                }
                 
-                Text(statusText)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    if persistence.isDriveEnabled {
+                        StatusBadge(icon: "icloud", label: "Drive", isActive: driveWatcher.isRunning)
+                    }
+                    if persistence.isPhotosEnabled {
+                        StatusBadge(icon: "photo", label: "Photos", isActive: photosWatcher.isRunning)
+                    }
+                    if !persistence.isDriveEnabled && !persistence.isPhotosEnabled {
+                        Text("No services enabled")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
             .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding(.vertical, 10)
             
             Divider()
             
@@ -143,7 +269,7 @@ struct Main: View {
                     .padding(10)
                     .background(Color.orange.opacity(0.1))
                     
-                } else {
+                } else if persistence.isDriveEnabled || persistence.isPhotosEnabled {
                     Menu {
                         Button("Pause for 1 Hour") {
                             pause(hours: 1)
@@ -192,6 +318,28 @@ struct Main: View {
     }
 }
 
+struct StatusBadge: View {
+    let icon: String
+    let label: String
+    let isActive: Bool
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 9))
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+        }
+        .foregroundColor(isActive ? .white : .secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(isActive ? Color.accentColor : Color.secondary.opacity(0.2))
+        )
+    }
+}
+
 struct PauseMenuLabel: View {
     @State private var isHovered = false
     
@@ -200,12 +348,9 @@ struct PauseMenuLabel: View {
             Image(systemName: "pause.circle")
                 .frame(width: 20)
                 .foregroundColor(.primary)
-            
             Text("Pause Syncing")
                 .foregroundColor(.primary)
-            
             Spacer()
-            
             Image(systemName: "chevron.right")
                 .font(.caption)
                 .foregroundColor(.secondary)

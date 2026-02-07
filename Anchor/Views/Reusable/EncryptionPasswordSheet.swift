@@ -162,4 +162,5 @@ struct EncryptionPasswordSheet: View {
 
 extension Notification.Name {
     static let generatedNewIdentity = Notification.Name("anchor_generated_new_identity")
+    static let openSettingsTab = Notification.Name("anchor_open_settings_tab")
 }

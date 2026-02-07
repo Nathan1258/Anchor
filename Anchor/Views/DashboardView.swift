@@ -15,156 +15,181 @@ struct DashboardView: View {
     @ObservedObject var network = NetworkMonitor.shared
     
     @Environment(\.openWindow) var openWindow
-    
-    @State private var selectedTab: Int = 0
+    @Namespace private var glassNamespace
     
     var body: some View {
-        VStack(spacing: 0) {
+        ZStack {
+            LinearGradient(
+                gradient: Gradient(colors: [
+                    Color(nsColor: .windowBackgroundColor),
+                    Color(nsColor: .windowBackgroundColor).opacity(0.95)
+                ]),
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
             
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Anchor")
-                        .font(.title2)
-                        .fontWeight(.bold)
+            VStack(spacing: 0) {
+                GlassEffectContainer(spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Anchor")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                            Text("Backup Monitor")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Button(action: { openWindow(id: "settings") }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 16))
+                        }
+                        .buttonStyle(.glass)
+                        .help("Open Settings")
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .glassEffect()
                 }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
                 
-                Spacer()
-                
-                Picker("", selection: $selectedTab) {
-                    Text("Monitor").tag(0)
-                    Text("Restore").tag(1)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
-                
-                Spacer()
-                
-                Button(action: { openWindow(id: "settings") }) {
-                    Image(systemName: "gearshape")
-                }
-                .buttonStyle(.borderless)
-                .help("Open Settings")
-            }
-            .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
-            
-            if selectedTab == 0 {
                 monitorView
-            } else {
-                RestoreBrowserView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 600, minHeight: 400)
     }
     
-    // MARK: - Monitor View (Extracted)
     var monitorView: some View {
-        VStack(spacing: 0) {
-            
-            if network.status == .disconnected {
-                StatusBanner(
-                    text: "No Internet Connection",
-                    subtext: "Syncing paused until connection is restored.",
-                    color: .red,
-                    icon: "wifi.slash"
-                )
-            } else if network.status == .captivePortal {
-                StatusBanner(
-                    text: "Wi-Fi Login Required",
-                    subtext: "You are connected to Wi-Fi, but internet is blocked. Please log in via your browser.",
-                    color: .orange,
-                    icon: "exclamationmark.triangle.fill"
-                )
-            }
-            
-            if persistence.isGlobalPaused {
-                HStack {
-                    Image(systemName: "pause.circle.fill")
-                    VStack(alignment: .leading) {
-                        Text("Global Pause Active")
-                            .fontWeight(.bold)
-                        if let date = persistence.pausedUntil {
-                            Text("Resuming \(date, style: .relative)")
-                                .font(.caption)
-                        } else {
-                            Text("Paused indefinitely")
-                                .font(.caption)
+        ScrollView {
+            VStack(spacing: 16) {
+                VStack(spacing: 12) {
+                    if network.status == .disconnected {
+                        StatusBanner(
+                            text: "No Internet Connection",
+                            subtext: "Syncing paused until connection is restored.",
+                            color: .red,
+                            icon: "wifi.slash"
+                        )
+                    } else if network.status == .captivePortal {
+                        StatusBanner(
+                            text: "Wi-Fi Login Required",
+                            subtext: "You are connected to Wi-Fi, but internet is blocked. Please log in via your browser.",
+                            color: .orange,
+                            icon: "exclamationmark.triangle.fill"
+                        )
+                    }
+                    
+                    if persistence.isGlobalPaused {
+                        GlassEffectContainer(spacing: 12) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "pause.circle.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(.orange)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Global Pause Active")
+                                        .fontWeight(.semibold)
+                                    if let date = persistence.pausedUntil {
+                                        Text("Resuming \(date, style: .relative)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    } else {
+                                        Text("Paused indefinitely")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                Button("Resume Now") {
+                                    persistence.pausedUntil = nil
+                                    driveWatcher.startWatching()
+                                    photosWatcher.startWatching()
+                                }
+                                .buttonStyle(.glassProminent)
+                                .controlSize(.small)
+                            }
+                            .padding(16)
+                            .glassEffect(.regular.tint(.orange))
                         }
+                        .padding(.horizontal, 20)
                     }
-                    Spacer()
-                    Button("Resume Now") {
-                        persistence.pausedUntil = nil
-                        driveWatcher.startWatching()
-                        photosWatcher.startWatching()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
-                .padding()
-                .background(Color.orange.opacity(0.15))
-                .overlay(Rectangle().frame(height: 1).foregroundColor(.orange.opacity(0.3)), alignment: .bottom)
-            }
-            
-            Divider()
-            
-            // MARK: - Engines
-            HStack(spacing: 0) {
                 
-                // LEFT: Drive Engine
-                EngineStatusColumn(
-                    title: "iCloud Drive",
-                    icon: "icloud",
-                    statusColor: driveStatusColor,
-                    statusText: driveWatcher.status.label,
-                    isRunning: driveWatcher.isRunning,
-                    isConfigured: driveWatcher.sourceURL != nil && driveWatcher.vaultURL != nil,
-                    primaryMetric: "\(driveWatcher.sessionVaultedCount)",
-                    primaryLabel: "Files Vaulted",
-                    secondaryMetric: "\(driveWatcher.sessionScannedCount)",
-                    secondaryLabel: "Scanned",
-                    lastActivity: driveWatcher.lastFileProcessed,
-                    onStart: driveWatcher.startWatching,
-                    onConfigure: { openWindow(id: "settings") }
-                )
+                GlassEffectContainer(spacing: 16) {
+                    HStack(spacing: 16) {
+                        EngineStatusColumn(
+                            title: "iCloud Drive",
+                            icon: "icloud",
+                            statusColor: driveStatusColor,
+                            statusText: driveWatcher.status.label,
+                            isRunning: driveWatcher.isRunning,
+                            isConfigured: driveWatcher.sourceURL != nil && driveWatcher.vaultURL != nil,
+                            primaryMetric: "\(driveWatcher.sessionVaultedCount)",
+                            primaryLabel: "Files Vaulted",
+                            secondaryMetric: "\(driveWatcher.sessionScannedCount)",
+                            secondaryLabel: "Scanned",
+                            lastActivity: driveWatcher.lastFileProcessed,
+                            onStart: driveWatcher.startWatching,
+                            onConfigure: { 
+                                NotificationCenter.default.post(name: .openSettingsTab, object: 2)
+                                openWindow(id: "settings")
+                            },
+                            onRestore: { openWindow(id: "restore") }
+                        )
+                        .glassEffect(in: .rect(cornerRadius: 16))
+                        
+                        EngineStatusColumn(
+                            title: "Photo Library",
+                            icon: "photo",
+                            statusColor: photoStatusColor,
+                            statusText: photosWatcher.status.label,
+                            isRunning: photosWatcher.isRunning,
+                            isConfigured: photosWatcher.vaultURL != nil,
+                            primaryMetric: "\(photosWatcher.sessionSavedCount)",
+                            primaryLabel: "Photos Saved",
+                            secondaryMetric: "\(photosWatcher.totalLibraryCount)",
+                            secondaryLabel: "Total Items",
+                            lastActivity: photosWatcher.lastPhotoProcessed,
+                            onStart: photosWatcher.startWatching,
+                            onConfigure: { 
+                                NotificationCenter.default.post(name: .openSettingsTab, object: 3)
+                                openWindow(id: "settings")
+                            },
+                            onRestore: nil
+                        )
+                        .glassEffect(in: .rect(cornerRadius: 16))
+                    }
+                    .padding(.horizontal, 20)
+                }
                 
-                Divider()
-                
-                // RIGHT: Photos Engine
-                EngineStatusColumn(
-                    title: "Photo Library",
-                    icon: "photo",
-                    statusColor: photoStatusColor,
-                    statusText: photosWatcher.status.label,
-                    isRunning: photosWatcher.isRunning,
-                    isConfigured: photosWatcher.vaultURL != nil,
-                    primaryMetric: "\(photosWatcher.sessionSavedCount)",
-                    primaryLabel: "Photos Saved",
-                    secondaryMetric: "\(photosWatcher.totalLibraryCount)",
-                    secondaryLabel: "Total Items",
-                    lastActivity: photosWatcher.lastPhotoProcessed,
-                    onStart: photosWatcher.startWatching,
-                    onConfigure: { openWindow(id: "settings") }
-                )
+                GlassEffectContainer(spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 6))
+                            .foregroundStyle(.green)
+                        
+                        Text(lastLogMessage)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .glassEffect()
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
             }
-            .frame(maxHeight: .infinity)
-            
-            Divider()
-            
-            // MARK: - Footer / Logs
-            HStack {
-                Text(lastLogMessage)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
-                Spacer()
-            }
-            .padding(8)
-            .background(Color(nsColor: .controlBackgroundColor))
         }
     }
-    
-    // MARK: - Computed State
-    
+        
     var driveStatusColor: Color {
         switch driveWatcher.status {
         case .waitingForVault: return .orange
@@ -192,7 +217,6 @@ struct DashboardView: View {
     }
 }
 
-// MARK: - Subviews
 
 struct EngineStatusColumn: View {
     let title: String
@@ -210,91 +234,129 @@ struct EngineStatusColumn: View {
     
     let onStart: () -> Void
     let onConfigure: () -> Void
+    let onRestore: (() -> Void)?
     
     var body: some View {
-        VStack(spacing: 20) {
-            
-            // Header
-            VStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 40))
-                    .foregroundColor(isRunning ? statusColor : .gray)
-                    .opacity(isRunning ? 1.0 : 0.5)
-                
-                Text(title)
-                    .font(.headline)
-                
-                HStack(spacing: 6) {
+        VStack(spacing: 24) {
+            VStack(spacing: 12) {
+                ZStack {
                     Circle()
-                        .fill(statusColor)
-                        .frame(width: 6, height: 6)
-                    Text(statusText)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .fill(isRunning ? statusColor.opacity(0.15) : Color.gray.opacity(0.1))
+                        .frame(width: 80, height: 80)
+                    
+                    Image(systemName: icon)
+                        .font(.system(size: 36))
+                        .foregroundStyle(isRunning ? statusColor : .secondary)
+                        .symbolEffect(.pulse, isActive: isRunning)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().stroke(Color.gray.opacity(0.3)))
+                
+                VStack(spacing: 4) {
+                    Text(title)
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                    
+                    GlassEffectContainer(spacing: 8) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(statusColor)
+                                .frame(width: 6, height: 6)
+                            Text(statusText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .glassEffect()
+                    }
+                }
             }
-            .padding(.top, 30)
+            .padding(.top, 24)
             
             Spacer()
             
-            // Metrics
-            HStack(spacing: 30) {
-                MetricColumn(value: primaryMetric, label: primaryLabel)
-                MetricColumn(value: secondaryMetric, label: secondaryLabel)
-            }
-            .opacity(isRunning ? 1.0 : 0.5)
-            
-            // Recent Activity
-            if isRunning {
-                Text(lastActivity)
-                    .font(.caption2)
-                    .monospaced()
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .padding(.top, 4)
+            VStack(spacing: 16) {
+                MetricRow(value: primaryMetric, label: primaryLabel, isRunning: isRunning)
+                MetricRow(value: secondaryMetric, label: secondaryLabel, isRunning: isRunning)
             }
             
-            Spacer()
-            
-            // Action Button
-            if !isConfigured {
-                Button("Configure in Settings") { onConfigure() }
-                    .buttonStyle(.bordered)
-            } else if !isRunning {
-                Button("Start Monitor") { onStart() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-            } else {
-                Text("Engine Running")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.bottom, 5)
+            if isRunning && !lastActivity.isEmpty {
+                VStack(spacing: 4) {
+                    Text("Recent Activity")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .textCase(.uppercase)
+                    
+                    Text(lastActivity)
+                        .font(.caption)
+                        .monospaced()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 12)
             }
             
             Spacer()
+            
+            VStack(spacing: 8) {
+                if !isConfigured {
+                    Button("Configure in Settings") { onConfigure() }
+                        .buttonStyle(.glass)
+                        .controlSize(.large)
+                } else if !isRunning {
+                    Button("Start Monitor") { onStart() }
+                        .buttonStyle(.glassProminent)
+                        .controlSize(.large)
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Engine Running")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
+                if let onRestore = onRestore, isConfigured {
+                    Button(action: onRestore) {
+                        Label("Browse & Restore", systemImage: "clock.arrow.circlepath")
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                }
+            }
+            .padding(.bottom, 20)
         }
         .frame(maxWidth: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 
-struct MetricColumn: View {
+struct MetricRow: View {
     let value: String
     let label: String
+    let isRunning: Bool
     
     var body: some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.title)
-                .fontWeight(.light)
+        HStack {
             Text(label)
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
                 .textCase(.uppercase)
+            
+            Spacer()
+            
+            Text(value)
+                .font(.title2)
+                .fontWeight(.medium)
+                .monospacedDigit()
+                .foregroundStyle(isRunning ? .primary : .secondary)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+        )
     }
 }
 
@@ -305,25 +367,33 @@ struct StatusBanner: View {
     let icon: String
     
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.title2)
-                .foregroundColor(color)
-                .frame(height: 24)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(text)
-                    .fontWeight(.bold)
-                    .foregroundColor(color)
+        GlassEffectContainer(spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(color.opacity(0.2))
+                        .frame(width: 36, height: 36)
+                    
+                    Image(systemName: icon)
+                        .font(.system(size: 16))
+                        .foregroundStyle(color)
+                }
                 
-                Text(subtext)
-                    .font(.caption)
-                    .foregroundColor(.primary.opacity(0.8))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(text)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(color)
+                    
+                    Text(subtext)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
             }
-            Spacer()
+            .padding(16)
+            .glassEffect(.regular.tint(color))
         }
-        .padding()
-        .background(color.opacity(0.1))
-        .overlay(Rectangle().frame(height: 1).foregroundColor(color.opacity(0.3)), alignment: .bottom)
+        .padding(.horizontal, 20)
     }
 }

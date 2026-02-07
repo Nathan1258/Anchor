@@ -12,7 +12,7 @@ class ExclusionManager: ObservableObject {
     
     private let systemIgnoredNames: Set<String> = [
         "node_modules", ".git", ".svn", ".DS_Store",
-        "Thumbs.db", "Desktop.ini", "__MACOSX"
+        "Thumbs.db", "Desktop.ini", "__MACOSX", ".anchor_temp"
     ]
     
     private let systemIgnoredPrefixes: [String] = ["~$"]

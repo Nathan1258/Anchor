@@ -10,15 +10,17 @@ import SQLite3
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 class SQLiteLedger: @unchecked Sendable {
+    static let shared = SQLiteLedger()
+    
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "com.anchor.sqlite", attributes: .concurrent)
+    private var checkpointTimer: Timer?
         
     init() {
         let fileURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("anchor_ledger.sqlite")
-        
-        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         
         if !openDatabase(at: fileURL) {
             handleCorruption(at: fileURL)
@@ -29,9 +31,12 @@ class SQLiteLedger: @unchecked Sendable {
         }
         
         createTable()
+        startPeriodicCheckpoint()
     }
     
     deinit {
+        checkpointTimer?.invalidate()
+        performCheckpoint()
         sqlite3_close(db)
     }
     
@@ -65,9 +70,9 @@ class SQLiteLedger: @unchecked Sendable {
             """
             var stmt2: OpaquePointer?
             if sqlite3_prepare_v2(self.db, childrenQuery, -1, &stmt2, nil) == SQLITE_OK {
-                sqlite3_bind_text(stmt2, 1, (newPath as NSString).utf8String, -1, SQLITE_TRANSIENT) // Replacement prefix
-                sqlite3_bind_text(stmt2, 2, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT) // Length calculator
-                sqlite3_bind_text(stmt2, 3, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT) // Matcher
+                sqlite3_bind_text(stmt2, 1, (newPath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt2, 2, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt2, 3, (oldPath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_step(stmt2)
             }
             sqlite3_finalize(stmt2)
@@ -96,9 +101,6 @@ class SQLiteLedger: @unchecked Sendable {
     private func createTable() {
         _ = execute(sql: "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT, failure_count INTEGER DEFAULT 0);")
         _ = execute(sql: "CREATE TABLE IF NOT EXISTS uploads (path TEXT PRIMARY KEY, upload_id TEXT, timestamp DOUBLE);")
-        
-        // Migration: Add failure_count column if it doesn't exist
-        _ = execute(sql: "ALTER TABLE files ADD COLUMN failure_count INTEGER DEFAULT 0;")
     }
     
     func getStoredCasing(for relativePath: String) -> String? {
@@ -368,8 +370,60 @@ class SQLiteLedger: @unchecked Sendable {
         }
     }
     
+    func resetAllFailureCounts() {
+        queue.async(flags: .barrier) {
+            let query = "UPDATE files SET failure_count = 0 WHERE failure_count > 0;"
+            var statement: OpaquePointer?
+            
+            if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
+                if sqlite3_step(statement) != SQLITE_DONE {
+                    self.logError("Write Error (resetAllFailureCounts)")
+                } else {
+                    let rowsAffected = sqlite3_changes(self.db)
+                    if rowsAffected > 0 {
+                        print("Reset failure counts for \(rowsAffected) files")
+                    }
+                }
+            } else {
+                self.logError("Prepare Error (resetAllFailureCounts)")
+            }
+            sqlite3_finalize(statement)
+        }
+    }
+    
     func execute(sql: String) -> Bool {
         return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
+    }
+    
+    private func startPeriodicCheckpoint() {
+        DispatchQueue.main.async { [weak self] in
+            self?.checkpointTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+                self?.performCheckpoint()
+            }
+        }
+    }
+    
+    func performCheckpoint() {
+        queue.async(flags: .barrier) {
+            var nLog: Int32 = 0
+            var nCkpt: Int32 = 0
+            
+            let result = sqlite3_wal_checkpoint_v2(
+                self.db,
+                nil,
+                SQLITE_CHECKPOINT_TRUNCATE,
+                &nLog,
+                &nCkpt
+            )
+            
+            if result == SQLITE_OK {
+                if nLog > 0 || nCkpt > 0 {
+                    print("WAL Checkpoint: Merged \(nLog) frames, checkpointed \(nCkpt) frames")
+                }
+            } else {
+                self.logError("WAL Checkpoint Failed")
+            }
+        }
     }
     
     private func logError(_ context: String) {

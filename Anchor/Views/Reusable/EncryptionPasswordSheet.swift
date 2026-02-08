@@ -144,6 +144,8 @@ struct EncryptionPasswordSheet: View {
                         onCompletion(true)
                     } else {
                         CryptoManager.shared.disableEncryption()
+                        let identity = VaultIdentity(vaultID: UUID())
+                        NotificationCenter.default.post(name: .generatedNewIdentity, object: identity)
                         onCompletion(true)
                     }
                 }

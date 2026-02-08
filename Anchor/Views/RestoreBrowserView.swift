@@ -172,7 +172,8 @@ struct RestoreBrowserView: View {
                                     path = String(path.dropLast(7))
                                 }
                                 
-                                if path.contains("anchor_identity.json") { return nil }
+                                if path.contains(".anchor_identity.json") { return nil }
+                                if path.contains(".anchor_photo_token") { return nil }
                                 
                                 return path
                             }

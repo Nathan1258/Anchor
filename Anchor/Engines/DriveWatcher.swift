@@ -34,6 +34,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     private var cancellables = Set<AnyCancellable>()
     
     private var debounceTasks: [URL: DispatchWorkItem] = [:]
+    private let debounceQueue = DispatchQueue(label: "com.anchor.debounce", attributes: .concurrent)
     private var scheduleTimer: AnyCancellable?
     private var lastScheduledScan: Date?
     
@@ -62,10 +63,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func getVaultPath(for relativePath: String) -> String {
-        if PersistenceManager.shared.driveVaultType == .s3 {
-            return "drive/" + relativePath
-        }
-        return relativePath
+        return "drive/" + relativePath
     }
     
     private func setupNetworkObserver() {
@@ -108,6 +106,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             .autoconnect()
             .sink { [weak self] _ in
                 self?.checkSourceHealth()
+                self?.checkVaultAvailability()
             }
             .store(in: &cancellables)
     }
@@ -119,6 +118,10 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             return
         }
         
+        if isInTrash(bookmark) {
+            return
+        }
+        
         if bookmark.startAccessingSecurityScopedResource() {
             log("Source folder is now accessible. Attempting to start...")
             self.sourceURL = bookmark
@@ -127,6 +130,28 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             let isS3Ready = (PersistenceManager.shared.driveVaultType == .s3 && PersistenceManager.shared.s3Config.isValid)
             
             if isLocalReady || isS3Ready {
+                startWatching()
+            }
+        }
+    }
+    
+    private func checkVaultAvailability() {
+        guard vaultURL == nil else { return }
+        guard PersistenceManager.shared.driveVaultType == .local else { return }
+        
+        guard let bookmark = PersistenceManager.shared.loadBookmark(type: .driveVault) else {
+            return
+        }
+        
+        if isInTrash(bookmark) {
+            return
+        }
+        
+        if bookmark.startAccessingSecurityScopedResource() {
+            log("Vault folder is now accessible. Attempting to start...")
+            self.vaultURL = bookmark
+            
+            if sourceURL != nil {
                 startWatching()
             }
         }
@@ -180,7 +205,9 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     
     private func restoreState() {
         if let source = PersistenceManager.shared.loadBookmark(type: .driveSource) {
-            if source.startAccessingSecurityScopedResource() {
+            if isInTrash(source) {
+                log("Source folder is in trash. Skipping load but keeping bookmark for auto-recovery.")
+            } else if source.startAccessingSecurityScopedResource() {
                 self.sourceURL = source
             } else {
                 log("Source folder not accessible (may be on unmounted volume). Will retry when volume appears.")
@@ -188,9 +215,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         }
         
         if PersistenceManager.shared.driveVaultType == .local,
-           let vault = PersistenceManager.shared.loadBookmark(type: .driveVault),
-           vault.startAccessingSecurityScopedResource(){
-            self.vaultURL = vault
+           let vault = PersistenceManager.shared.loadBookmark(type: .driveVault) {
+            if isInTrash(vault) {
+                log("Vault folder is in trash. Skipping load but keeping bookmark for auto-recovery.")
+            } else if vault.startAccessingSecurityScopedResource() {
+                self.vaultURL = vault
+            }
         }
         
         if let desktop = PersistenceManager.shared.loadBookmark(type: .desktopFolder),
@@ -212,6 +242,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 startWatching()
             }
         }
+    }
+    
+    private func isInTrash(_ url: URL) -> Bool {
+        let username = NSUserName()
+        let userTrashPath = "/Users/\(username)/.Trash"
+        return url.path.hasPrefix(userTrashPath)
     }
     
     var presentedItemURL: URL? { return sourceURL }
@@ -249,17 +285,23 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     }
     
     private func debounceFileEvent(at url: URL) {
-        if let existingTask = debounceTasks[url] {
-            existingTask.cancel()
+        debounceQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            
+            if let existingTask = self.debounceTasks[url] {
+                existingTask.cancel()
+            }
+            
+            let task = DispatchWorkItem { [weak self] in
+                self?.debounceQueue.async(flags: .barrier) {
+                    self?.debounceTasks.removeValue(forKey: url)
+                }
+                self?.handleIncomingFile(at: url)
+            }
+            
+            self.debounceTasks[url] = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: task)
         }
-        
-        let task = DispatchWorkItem { [weak self] in
-            self?.debounceTasks.removeValue(forKey: url)
-            self?.handleIncomingFile(at: url)
-        }
-        
-        debounceTasks[url] = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: task)
     }
     
     func pickNewVaultFolder(completion: @escaping (URL) -> Void) {
@@ -493,17 +535,37 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Grant Access"
-        panel.message = "Select the Desktop folder inside iCloud Drive to enable syncing."
+        panel.message = "Select your Desktop folder to enable syncing."
         
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let desktopPath = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/Desktop")
+        let desktopPath = home.appendingPathComponent("Desktop")
         panel.directoryURL = desktopPath
         
-        panel.begin { response in
+        panel.begin { [weak self] response in
+            guard let self = self else { return }
+            
             if response == .OK, let url = panel.url {
-                self.desktopURL = url
-                PersistenceManager.shared.saveBookmark(for: url, type: .desktopFolder)
-                self.log("Desktop folder added: \(url.path)")
+                let lastComponent = url.lastPathComponent
+                
+                if lastComponent == "Desktop" {
+                    self.desktopURL = url
+                    PersistenceManager.shared.saveBookmark(for: url, type: .desktopFolder)
+                    self.log("Desktop folder added: \(url.path)")
+                    
+                    if self.isRunning {
+                        self.setupAuxiliaryPresenters()
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        let alert = NSAlert()
+                        alert.messageText = "Invalid Folder"
+                        alert.informativeText = "Please select your Desktop folder that syncs with iCloud Drive. The folder must be named 'Desktop'."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    }
+                    self.log("Invalid folder selected - must be named Desktop")
+                }
             }
         }
     }
@@ -514,17 +576,37 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Grant Access"
-        panel.message = "Select the Documents folder inside iCloud Drive to enable syncing."
+        panel.message = "Select your Documents folder to enable syncing."
         
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let documentsPath = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/Documents")
+        let documentsPath = home.appendingPathComponent("Documents")
         panel.directoryURL = documentsPath
         
-        panel.begin { response in
+        panel.begin { [weak self] response in
+            guard let self = self else { return }
+            
             if response == .OK, let url = panel.url {
-                self.documentsURL = url
-                PersistenceManager.shared.saveBookmark(for: url, type: .documentsFolder)
-                self.log("Documents folder added: \(url.path)")
+                let lastComponent = url.lastPathComponent
+                
+                if lastComponent == "Documents" {
+                    self.documentsURL = url
+                    PersistenceManager.shared.saveBookmark(for: url, type: .documentsFolder)
+                    self.log("Documents folder added: \(url.path)")
+                    
+                    if self.isRunning {
+                        self.setupAuxiliaryPresenters()
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        let alert = NSAlert()
+                        alert.messageText = "Invalid Folder"
+                        alert.informativeText = "Please select your Documents folder that syncs with iCloud Drive. The folder must be named 'Documents'."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    }
+                    self.log("Invalid folder selected - must be named Documents")
+                }
             }
         }
     }
@@ -754,6 +836,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         }
         log("Starting Smart Scan (\(foldersToScan.count) folder\(foldersToScan.count > 1 ? "s" : ""))...")
         
+        let persistence = PersistenceManager.shared
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
@@ -763,11 +846,18 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
             )
             defer { ProcessInfo.processInfo.endActivity(activity) }
             
-            if PersistenceManager.shared.isGlobalPaused {
+            var shouldPause = false
+            var shouldContinue = false
+            DispatchQueue.main.sync {
+                shouldPause = persistence.isGlobalPaused
+                shouldContinue = persistence.isDriveEnabled
+            }
+            
+            if shouldPause {
                 DispatchQueue.main.async { self.status = .paused }
                 return
             }
-            guard PersistenceManager.shared.isDriveEnabled else { return }
+            guard shouldContinue else { return }
             
             let fileManager = FileManager.default
             let keys: [URLResourceKey] = [
@@ -784,14 +874,22 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                 guard let enumerator = fileManager.enumerator(at: folderToScan, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { continue }
                 
                 for case let fileURL as URL in enumerator {
-                if PersistenceManager.shared.isGlobalPaused {
+                var isPaused = false
+                var isEnabled = false
+                DispatchQueue.main.sync {
+                    isPaused = persistence.isGlobalPaused
+                    isEnabled = persistence.isDriveEnabled
+                }
+                
+                if isPaused {
                     DispatchQueue.main.async { self.status = .paused }
                     break
                 }
-                if !PersistenceManager.shared.isDriveEnabled { break }
+                if !isEnabled { break }
                 if (processed + skipped) % 50 == 0 {
+                    let count = processed + skipped
                     DispatchQueue.main.async {
-                        self.sessionScannedCount = processed + skipped
+                        self.sessionScannedCount = count
                     }
                 }
                 

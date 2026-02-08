@@ -24,11 +24,17 @@ protocol VaultProvider: Sendable {
     
     func moveItem(from oldPath: String, to newPath: String) async throws
     
-    /// Checks for 'anchor_identity.json' in the root.
+    /// Checks for '.anchor_identity.json' in the root.
     func loadIdentity() async throws -> VaultIdentity?
     
     /// Saves the lock file during setup.
     func saveIdentity(_ identity: VaultIdentity) async throws
+    
+    /// Loads the photo library persistent token from the vault.
+    func loadPhotoToken() async throws -> Data?
+    
+    /// Saves the photo library persistent token to the vault.
+    func savePhotoToken(_ tokenData: Data) async throws
     
     /// Downloads specific file to temporary directory for restoring
     func downloadFile(relativePath: String, to localURL: URL) async throws
@@ -38,10 +44,11 @@ protocol VaultProvider: Sendable {
 }
 
 class VaultFactory {
-    static func getProvider(type: VaultType) async throws -> VaultProvider? {
+    static func getProvider(type: VaultType, bookmarkType: PersistenceManager.BookmarkType? = nil) async throws -> VaultProvider? {
         switch type {
         case .local:
-            if let vaultURL = PersistenceManager.shared.loadBookmark(type: .driveVault) {
+            let bookmark = bookmarkType ?? .driveVault
+            if let vaultURL = PersistenceManager.shared.loadBookmark(type: bookmark) {
                 return LocalVault(rootURL: vaultURL)
             }
             return nil

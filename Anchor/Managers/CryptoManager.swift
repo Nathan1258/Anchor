@@ -43,14 +43,18 @@ class CryptoManager {
         let sealedBox = try AES.GCM.seal(knownString, using: key)
         let token = sealedBox.combined!
         
-        return VaultIdentity(salt: salt, vaultID: UUID(), verificationToken: token)
+        return VaultIdentity(vaultID: UUID(), salt: salt, verificationToken: token)
     }
     
     func unlock(password: String, identity: VaultIdentity) throws {
-        let key = try deriveKey(password: password, salt: identity.salt)
+        guard let salt = identity.salt, let token = identity.verificationToken else {
+            throw CryptoError.invalidPassword
+        }
+        
+        let key = try deriveKey(password: password, salt: salt)
         
         do {
-            let sealedBox = try AES.GCM.SealedBox(combined: identity.verificationToken)
+            let sealedBox = try AES.GCM.SealedBox(combined: token)
             let openedBox = try AES.GCM.open(sealedBox, using: key)
             
             guard let checkString = String(data: openedBox, encoding: .utf8),

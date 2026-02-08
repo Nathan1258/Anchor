@@ -36,6 +36,35 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         restoreState()
         setupPauseObserver()
         setupNetworkObserver()
+        setupVaultHealthCheck()
+    }
+    
+    private func setupVaultHealthCheck() {
+        Timer.publish(every: 5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.checkVaultAvailability()
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func checkVaultAvailability() {
+        guard vaultURL == nil else { return }
+        guard PersistenceManager.shared.photoVaultType == .local else { return }
+        
+        guard let bookmark = PersistenceManager.shared.loadBookmark(type: .photoVault) else {
+            return
+        }
+        
+        if isInTrash(bookmark) {
+            return
+        }
+        
+        if bookmark.startAccessingSecurityScopedResource() {
+            log("Vault folder is now accessible. Attempting to start...")
+            self.vaultURL = bookmark
+            startWatching()
+        }
     }
     
     private func setupNetworkObserver() {
@@ -73,7 +102,9 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     private func restoreState() {
         if PersistenceManager.shared.photoVaultType == .local,
            let source = PersistenceManager.shared.loadBookmark(type: .photoVault) {
-            if source.startAccessingSecurityScopedResource() {
+            if isInTrash(source) {
+                log("Vault folder is in trash. Skipping load but keeping bookmark for auto-recovery.")
+            } else if source.startAccessingSecurityScopedResource() {
                 self.vaultURL = source
             }
         }
@@ -85,6 +116,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             log("Restored previous session. Auto-starting...")
             startWatching()
         }
+    }
+    
+    private func isInTrash(_ url: URL) -> Bool {
+        let username = NSUserName()
+        let userTrashPath = "/Users/\(username)/.Trash"
+        return url.path.hasPrefix(userTrashPath)
     }
     
     func selectVaultFolder() {
@@ -100,6 +137,32 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 PersistenceManager.shared.saveBookmark(for: url, type: .photoVault)
                 self.log("Photo Vault set to: \(url.path)")
             }
+        }
+    }
+    
+    private func syncTokenToVault(_ token: PHPersistentChangeToken) {
+        Task {
+            guard let provider = vaultProvider else { return }
+            
+            do {
+                let data = try NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
+                try await provider.savePhotoToken(data)
+            } catch {
+                log("Failed to sync token to vault: \(error)")
+            }
+        }
+    }
+    
+    private func loadTokenFromVault() async -> PHPersistentChangeToken? {
+        guard let provider = vaultProvider else { return nil }
+        
+        do {
+            guard let data = try await provider.loadPhotoToken() else { return nil }
+            let token = try NSKeyedUnarchiver.unarchivedObject(ofClass: PHPersistentChangeToken.self, from: data)
+            return token
+        } catch {
+            log("Failed to load token from vault: \(error)")
+            return nil
         }
     }
     
@@ -251,11 +314,36 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         }
         guard PersistenceManager.shared.isPhotosEnabled else { return }
         
-        guard let lastToken = PersistenceManager.shared.loadPhotoToken() else {
-            performFullScan()
+        var lastToken = PersistenceManager.shared.loadPhotoToken()
+        
+        if lastToken == nil {
+            Task {
+                if let vaultToken = await loadTokenFromVault() {
+                    await MainActor.run {
+                        PersistenceManager.shared.savePhotoToken(vaultToken)
+                        log("Restored photo token from vault")
+                        lastToken = vaultToken
+                    }
+                }
+                
+                guard let token = lastToken else {
+                    await MainActor.run {
+                        performFullScan()
+                    }
+                    return
+                }
+                
+                await MainActor.run {
+                    processTokenChanges(token: token)
+                }
+            }
             return
         }
         
+        processTokenChanges(token: lastToken!)
+    }
+    
+    private func processTokenChanges(token: PHPersistentChangeToken) {
         DispatchQueue.main.async {
             self.isProcessing = true
             self.status = .checkingForChanges
@@ -264,7 +352,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         log("Checking for new photos since last run...")
         
         do {
-            let changes = try PHPhotoLibrary.shared().fetchPersistentChanges(since: lastToken)
+            let changes = try PHPhotoLibrary.shared().fetchPersistentChanges(since: token)
             processDelta(changes)
         } catch {
             log("Error checking changes: \(error). Falling back to full scan.")
@@ -332,6 +420,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     }
                     if PersistenceManager.shared.isPhotosEnabled {
                         PersistenceManager.shared.savePhotoToken(change.changeToken)
+                        syncTokenToVault(change.changeToken)
                     }
                     
                 }catch{
@@ -376,6 +465,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         } else {
             let currentToken = PHPhotoLibrary.shared().currentChangeToken
             PersistenceManager.shared.savePhotoToken(currentToken)
+            syncTokenToVault(currentToken)
             log("Baseline reset. Only new photos will be saved to the new destination.")
         }
         
@@ -395,6 +485,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let currentToken = PHPhotoLibrary.shared().currentChangeToken
         
         PersistenceManager.shared.savePhotoToken(currentToken)
+        syncTokenToVault(currentToken)
         
         self.log("Baseline set. Skipping historical import. Only new photos will be synced.")
     }
@@ -465,6 +556,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             
             let currentToken = PHPhotoLibrary.shared().currentChangeToken
             PersistenceManager.shared.savePhotoToken(currentToken)
+            syncTokenToVault(currentToken)
             
             await MainActor.run {
                 self.isProcessing = false
@@ -536,8 +628,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             group.enter()
             
             let filename = resource.originalFilename
-            let prefix = PersistenceManager.shared.photoVaultType == .s3 ? "photos/" : ""
-            let relativePath = "\(prefix)\(year)/\(month)/\(filename)"
+            let relativePath = "photos/\(year)/\(month)/\(filename)"
             let tempFileURL = tempDir.appendingPathComponent(filename)
             
             let options = PHAssetResourceRequestOptions()
@@ -590,9 +681,15 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                 
                                 if !self.isRunning { return true }
                                 
-                                if !PersistenceManager.shared.isDriveEnabled { return true }
+                                var isDriveEnabled = false
+                                var isGlobalPaused = false
+                                DispatchQueue.main.sync {
+                                    isDriveEnabled = PersistenceManager.shared.isDriveEnabled
+                                    isGlobalPaused = PersistenceManager.shared.isGlobalPaused
+                                }
                                 
-                                if PersistenceManager.shared.isGlobalPaused { return true }
+                                if !isDriveEnabled { return true }
+                                if isGlobalPaused { return true }
                                 
                                 return false
                             }
@@ -675,8 +772,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         
         for resource in resources {
             let filename = resource.originalFilename
-            let prefix = PersistenceManager.shared.photoVaultType == .s3 ? "photos/" : ""
-            let relativePath = "\(prefix)\(year)/\(month)/\(filename)"
+            let relativePath = "photos/\(year)/\(month)/\(filename)"
             let tempFileURL = tempDir.appendingPathComponent(filename)
             
             let options = PHAssetResourceRequestOptions()

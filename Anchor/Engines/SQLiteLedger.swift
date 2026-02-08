@@ -130,6 +130,38 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
         }
     }
     
+    func wipeDriveFiles() {
+        queue.async(flags: .barrier) {
+            _ = self.execute(sql: "DELETE FROM files WHERE path LIKE 'drive/%';")
+            _ = self.execute(sql: "DELETE FROM uploads WHERE path LIKE 'drive/%';")
+            print("Drive files wiped from ledger.")
+        }
+    }
+    
+    func wipePhotoFiles() {
+        queue.async(flags: .barrier) {
+            _ = self.execute(sql: "DELETE FROM files WHERE path LIKE 'photos/%';")
+            _ = self.execute(sql: "DELETE FROM uploads WHERE path LIKE 'photos/%';")
+            print("Photo files wiped from ledger.")
+        }
+    }
+    
+    func markAllDriveFilesForReUpload() {
+        queue.sync(flags: .barrier) {
+            _ = self.execute(sql: "DELETE FROM files WHERE path LIKE 'drive/%';")
+            _ = self.execute(sql: "DELETE FROM uploads WHERE path LIKE 'drive/%';")
+            print("Drive files marked for re-upload with encryption.")
+        }
+    }
+    
+    func markAllPhotoFilesForReUpload() {
+        queue.sync(flags: .barrier) {
+            _ = self.execute(sql: "DELETE FROM files WHERE path LIKE 'photos/%';")
+            _ = self.execute(sql: "DELETE FROM uploads WHERE path LIKE 'photos/%';")
+            print("Photo files marked for re-upload with encryption.")
+        }
+    }
+    
     func getAllTrackedPaths() -> [String] {
         return queue.sync {
             var paths: [String] = []

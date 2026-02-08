@@ -8,6 +8,7 @@ import Combine
 import SwiftUI
 import ServiceManagement
 
+@MainActor
 class SettingsManager: ObservableObject {
     static let shared = SettingsManager()
     

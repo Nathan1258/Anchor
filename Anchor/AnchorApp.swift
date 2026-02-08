@@ -116,6 +116,14 @@ struct AnchorApp: App {
             return .systemGray
         }
         
+        if driveWatcher.status == .waitingForVault || photosWatcher.status == .waitingForVault {
+            return .systemRed
+        }
+        
+        if driveWatcher.status == .disabled || photosWatcher.status == .disabled {
+            return .systemRed
+        }
+        
         if driveWatcher.status == .scanning || photosWatcher.status == .scanning {
             return .systemBlue
         }
@@ -165,6 +173,46 @@ struct AnchorApp: App {
         
         return finalImage
     }
+    
+}
+
+struct VaultStatusChecker {
+    static func checkOnStartup(driveWatcher: DriveWatcher, photoWatcher: PhotoWatcher) {
+        NotificationManager.shared.requestPermissions()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let persistence = PersistenceManager.shared
+            var issues: [String] = []
+            
+            if persistence.isDriveEnabled {
+                if driveWatcher.status == .waitingForVault {
+                    issues.append("Drive vault folder is missing or disconnected")
+                } else if driveWatcher.status == .disabled {
+                    issues.append("Drive backup could not start - check vault configuration")
+                }
+            }
+            
+            if persistence.isPhotosEnabled {
+                if photoWatcher.status == .waitingForVault {
+                    issues.append("Photos vault folder is missing or disconnected")
+                } else if photoWatcher.status == .disabled {
+                    issues.append("Photos backup could not start - check vault configuration")
+                }
+            }
+            
+            if !issues.isEmpty {
+                let title = issues.count == 1 ? "Vault Issue Detected" : "Multiple Vault Issues Detected"
+                let body = issues.joined(separator: "\n")
+                NotificationManager.shared.send(title: title, body: body, type: .vaultIssue)
+            }
+        }
+    }
+    
+    static func isVaultInTrash(_ url: URL) -> Bool {
+        let username = NSUserName()
+        let userTrashPath = "/Users/\(username)/.Trash"
+        return url.path.hasPrefix(userTrashPath)
+    }
 }
 
 struct Main: View {
@@ -174,6 +222,7 @@ struct Main: View {
     @ObservedObject var persistence = PersistenceManager.shared
     
     @Environment(\.openWindow) var openWindow
+    @Environment(\.dismiss) var dismiss
     
     var statusInfo: (text: String, color: Color, isActive: Bool) {
         if persistence.isGlobalPaused {
@@ -219,6 +268,26 @@ struct Main: View {
                         .lineLimit(1)
                     
                     Spacer()
+                    
+                    if !persistence.isGlobalPaused && (persistence.isDriveEnabled || persistence.isPhotosEnabled) {
+                        Menu {
+                            Button("Pause for 1 Hour") {
+                                pause(hours: 1)
+                            }
+                            Button("Pause for 2 Hours") {
+                                pause(hours: 2)
+                            }
+                            Button("Pause Until Tomorrow") {
+                                pauseUntilTomorrow()
+                            }
+                        } label: {
+                            Image(systemName: "pause.circle")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 16))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                    }
                 }
                 
                 HStack(spacing: 4) {
@@ -268,31 +337,15 @@ struct Main: View {
                     }
                     .padding(10)
                     .background(Color.orange.opacity(0.1))
-                    
-                } else if persistence.isDriveEnabled || persistence.isPhotosEnabled {
-                    Menu {
-                        Button("Pause for 1 Hour") {
-                            pause(hours: 1)
-                        }
-                        Button("Pause for 2 Hours") {
-                            pause(hours: 2)
-                        }
-                        Button("Pause Until Tomorrow") {
-                            pauseUntilTomorrow()
-                        }
-                    } label: {
-                        PauseMenuLabel()
-                    }
-                    .menuStyle(.borderlessButton)
                 }
                 
                 Divider()
                 MenuButton(title: "Open Anchor", icon: "macwindow") {
-                    openWindow(id: "dashboard")
+                    openOrFocusWindow(id: "dashboard", title: "Dashboard")
                 }
                 
                 MenuButton(title: "Settings...", icon: "gear") {
-                    openWindow(id: "settings")
+                    openOrFocusWindow(id: "settings", title: "Settings")
                 }
                 
                 Divider()
@@ -303,6 +356,9 @@ struct Main: View {
             }
         }
         .frame(width: 300)
+        .onAppear {
+            VaultStatusChecker.checkOnStartup(driveWatcher: driveWatcher, photoWatcher: photosWatcher)
+        }
     }
     
     func pause(hours: Double) {
@@ -315,6 +371,17 @@ struct Main: View {
            let nextMorning = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) {
             persistence.pausedUntil = nextMorning
         }
+    }
+    
+    func openOrFocusWindow(id: String, title: String) {
+        if let existingWindow = NSApp.windows.first(where: { $0.title == title && $0.isVisible }) {
+            existingWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            openWindow(id: id)
+        }
+        
+        dismiss()
     }
 }
 
@@ -340,27 +407,4 @@ struct StatusBadge: View {
     }
 }
 
-struct PauseMenuLabel: View {
-    @State private var isHovered = false
-    
-    var body: some View {
-        HStack {
-            Image(systemName: "pause.circle")
-                .frame(width: 20)
-                .foregroundColor(.primary)
-            Text("Pause Syncing")
-                .foregroundColor(.primary)
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(isHovered ? Color.accentColor.opacity(0.1) : Color.clear)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            isHovered = hovering
-        }
-    }
-}
+

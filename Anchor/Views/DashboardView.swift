@@ -83,6 +83,43 @@ struct DashboardView: View {
                         )
                     }
                     
+                    // Vault status warnings
+                    if persistence.isDriveEnabled && driveWatcher.status == .waitingForVault {
+                        StatusBanner(
+                            text: "Drive Vault Folder Not Found",
+                            subtext: "The destination vault folder is disconnected, moved, or deleted. Backup will resume when the folder is available again.",
+                            color: .red,
+                            icon: "externaldrive.badge.exclamationmark"
+                        )
+                    }
+                    
+                    if persistence.isDriveEnabled && driveWatcher.status == .disabled {
+                        StatusBanner(
+                            text: "Drive Backup Disabled",
+                            subtext: "Could not initialize vault. Check settings and ensure vault folder is accessible.",
+                            color: .red,
+                            icon: "exclamationmark.triangle.fill"
+                        )
+                    }
+                    
+                    if persistence.isPhotosEnabled && photosWatcher.status == .waitingForVault {
+                        StatusBanner(
+                            text: "Photos Vault Folder Not Found",
+                            subtext: "The destination vault folder is disconnected, moved, or deleted. Backup will resume when the folder is available again.",
+                            color: .red,
+                            icon: "externaldrive.badge.exclamationmark"
+                        )
+                    }
+                    
+                    if persistence.isPhotosEnabled && photosWatcher.status == .disabled {
+                        StatusBanner(
+                            text: "Photos Backup Disabled",
+                            subtext: "Could not initialize vault. Check settings and ensure vault folder is accessible.",
+                            color: .red,
+                            icon: "exclamationmark.triangle.fill"
+                        )
+                    }
+                    
                     if persistence.isGlobalPaused {
                         GlassEffectContainer(spacing: 12) {
                             HStack(spacing: 12) {

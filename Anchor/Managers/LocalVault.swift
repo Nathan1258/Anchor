@@ -15,7 +15,7 @@ final class LocalVault: VaultProvider {
     }
     
     func loadIdentity() async throws -> VaultIdentity? {
-        let identityURL = rootURL.appendingPathComponent("anchor_identity.json")
+        let identityURL = rootURL.appendingPathComponent(".anchor_identity.json")
         
         guard FileManager.default.fileExists(atPath: identityURL.path) else {
             return nil
@@ -26,9 +26,28 @@ final class LocalVault: VaultProvider {
     }
     
     func saveIdentity(_ identity: VaultIdentity) async throws {
-        let identityURL = rootURL.appendingPathComponent("anchor_identity.json")
+        let identityURL = rootURL.appendingPathComponent(".anchor_identity.json")
         let data = try JSONEncoder().encode(identity)
         try data.write(to: identityURL)
+        
+        try (identityURL as NSURL).setResourceValue(true, forKey: .isHiddenKey)
+    }
+    
+    func loadPhotoToken() async throws -> Data? {
+        let tokenURL = rootURL.appendingPathComponent(".anchor_photo_token")
+        
+        guard FileManager.default.fileExists(atPath: tokenURL.path) else {
+            return nil
+        }
+        
+        return try Data(contentsOf: tokenURL)
+    }
+    
+    func savePhotoToken(_ tokenData: Data) async throws {
+        let tokenURL = rootURL.appendingPathComponent(".anchor_photo_token")
+        try tokenData.write(to: tokenURL)
+        
+        try (tokenURL as NSURL).setResourceValue(true, forKey: .isHiddenKey)
     }
     
     func downloadFile(relativePath: String, to localURL: URL) async throws {
@@ -97,7 +116,8 @@ final class LocalVault: VaultProvider {
         if prefix.isEmpty {
             let contents = try FileManager.default.contentsOfDirectory(at: targetURL, includingPropertiesForKeys: nil)
             for url in contents {
-                if url.lastPathComponent == "anchor_identity.json" { continue }
+                if url.lastPathComponent == ".anchor_identity.json" { continue }
+                if url.lastPathComponent == ".anchor_photo_token" { continue }
                 try FileManager.default.removeItem(at: url)
             }
         } else {

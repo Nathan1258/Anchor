@@ -8,6 +8,7 @@ import Foundation
 import Photos
 import Combine
 
+@MainActor
 class PersistenceManager: ObservableObject {
     static let shared = PersistenceManager()
     

@@ -39,7 +39,8 @@ class ReIndexManager: ObservableObject {
                 ledger.wipe() 
                 
                 for path in allPaths {
-                    if path == "anchor_identity.json" { continue }
+                    if path == ".anchor_identity.json" { continue }
+                    if path == ".anchor_photo_token" { continue }
                     if path.hasSuffix(".DS_Store") { continue }
                     
                     var logicalPath = path

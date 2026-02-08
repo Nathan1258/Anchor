@@ -66,11 +66,25 @@ class ExclusionManager: ObservableObject {
         PersistenceManager.shared.ignoredFolders = current
     }
     
+    func clearAllExclusions() {
+        PersistenceManager.shared.ignoredExtensions = []
+        PersistenceManager.shared.ignoredFolders = []
+        exclusionQueue.async(flags: .barrier) {
+            self.temporaryExcludedPaths.removeAll()
+            Task { @MainActor in
+                PersistenceManager.shared.ignoredPaths = []
+            }
+        }
+    }
+    
     
     func addTemporaryExclusion(path: String) {
         exclusionQueue.async(flags: .barrier) {
             self.temporaryExcludedPaths.insert(path)
-            PersistenceManager.shared.ignoredPaths = Array(self.temporaryExcludedPaths)
+            let paths = Array(self.temporaryExcludedPaths)
+            Task { @MainActor in
+                PersistenceManager.shared.ignoredPaths = paths
+            }
         }
         print("🚫 Temporarily excluding from backup: \(path)")
     }
@@ -78,7 +92,10 @@ class ExclusionManager: ObservableObject {
     func removeTemporaryExclusion(path: String) {
         exclusionQueue.async(flags: .barrier) {
             self.temporaryExcludedPaths.remove(path)
-            PersistenceManager.shared.ignoredPaths = Array(self.temporaryExcludedPaths)
+            let paths = Array(self.temporaryExcludedPaths)
+            Task { @MainActor in
+                PersistenceManager.shared.ignoredPaths = paths
+            }
         }
         print("✅ Removed temporary exclusion: \(path)")
     }

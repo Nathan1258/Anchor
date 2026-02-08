@@ -113,7 +113,8 @@ final class S3Vault: VaultProvider {
             
             let objectIds = objects.compactMap { obj -> S3ClientTypes.ObjectIdentifier? in
                 guard let key = obj.key else { return nil }
-                if key == "anchor_identity.json" { return nil }
+                if key == ".anchor_identity.json" { return nil }
+                if key == ".anchor_photo_token" { return nil }
                 return S3ClientTypes.ObjectIdentifier(key: key)
             }
             
@@ -233,7 +234,7 @@ final class S3Vault: VaultProvider {
     }
     
     func loadIdentity() async throws -> VaultIdentity? {
-        let input = GetObjectInput(bucket: self.bucket, key: "anchor_identity.json")
+        let input = GetObjectInput(bucket: self.bucket, key: ".anchor_identity.json")
         
         do {
             let output = try await client.getObject(input: input)
@@ -256,10 +257,37 @@ final class S3Vault: VaultProvider {
         let input = PutObjectInput(
             body: .data(data),
             bucket: self.bucket,
-            key: "anchor_identity.json"
+            key: ".anchor_identity.json"
         )
         _ = try await client.putObject(input: input)
         print("Identity file saved to S3")
+    }
+    
+    func loadPhotoToken() async throws -> Data? {
+        let input = GetObjectInput(bucket: self.bucket, key: ".anchor_photo_token")
+        
+        do {
+            let output = try await client.getObject(input: input)
+            guard let body = output.body else { return nil }
+            
+            return try await body.readData() ?? Data()
+        } catch {
+            let errString = String(describing: error)
+            if errString.contains("NoSuchKey") || errString.contains("NotFound") {
+                return nil
+            }
+            throw error
+        }
+    }
+    
+    func savePhotoToken(_ tokenData: Data) async throws {
+        let input = PutObjectInput(
+            body: .data(tokenData),
+            bucket: self.bucket,
+            key: ".anchor_photo_token"
+        )
+        _ = try await client.putObject(input: input)
+        print("Photo token saved to S3")
     }
     
     func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)? = nil) async throws {

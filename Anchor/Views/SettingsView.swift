@@ -51,6 +51,16 @@ struct SettingsView: View {
     @State private var showDesktopUnlinkAlert = false
     @State private var showDocumentsUnlinkAlert = false
     
+    @State private var showValidationAlert = false
+    @State private var validationMessage = ""
+    
+    @State private var showSharedVaultEncryptionAlert = false
+    @State private var sharedVaultMessage = ""
+    @State private var isSharedVaultEncryption = false
+    
+    @State private var showReEncryptionAlert = false
+    @State private var reEncryptionBackupType = ""
+    
     @State private var pendingEnableType: PendingEnableType?
     
     var backupDescription: String {
@@ -92,9 +102,19 @@ struct SettingsView: View {
         .sheet(item: $encryptionMode) { mode in
             EncryptionPasswordSheet(mode: mode) { success in
                 if success {
-                    finalizeVaultSetup()
+                    if isSharedVaultEncryption, let pendingType = pendingEnableType {
+                        let otherBackup = pendingType == .drive ? "Photos" : "Drive"
+                        reEncryptionBackupType = otherBackup
+                        showReEncryptionAlert = true
+                    } else {
+                        finalizeVaultSetup()
+                    }
                 } else {
                     pendingVaultProvider = nil
+                    pendingEnableType = nil
+                    pendingVaultTypeForCheck = nil
+                    pendingVaultURLForCheck = nil
+                    isSharedVaultEncryption = false
                 }
             }
         }
@@ -146,6 +166,10 @@ struct SettingsView: View {
         }
         .tabItem { Label("General", systemImage: "gear") }
         .tag(0)
+        .onAppear {
+            clearVaultIfInTrash(type: .drive)
+            clearVaultIfInTrash(type: .photos)
+        }
     }
     
     // MARK: - Cloud Tab
@@ -210,8 +234,7 @@ struct SettingsView: View {
                     get: { persistence.isDriveEnabled },
                     set: { newValue in
                         if newValue {
-                            persistence.isDriveEnabled = true
-                            driveWatcher.startWatching()
+                            attemptToEnable(type: .drive)
                         } else {
                             showDriveWipeAlert = true
                         }
@@ -222,14 +245,11 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
             }
             
-            Group {
-                driveSourceSection
-                driveDestinationSection
-                driveBackupStrategySection
-                driveScheduleSection
-                driveExclusionsSection
-            }
-            .disabled(!persistence.isDriveEnabled)
+            driveSourceSection
+            driveDestinationSection
+            driveBackupStrategySection
+            driveScheduleSection
+            driveExclusionsSection
         }
         .tabItem { Label("Drive", systemImage: "icloud.and.arrow.down") }
         .tag(2)
@@ -275,6 +295,41 @@ struct SettingsView: View {
         } message: {
             Text("Documents folder will be unlinked, but your main iCloud Drive folder will continue to sync.")
         }
+        .alert("Configuration Required", isPresented: $showValidationAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(validationMessage)
+        }
+        .alert("Shared Vault Detected", isPresented: $showSharedVaultEncryptionAlert) {
+            Button("Cancel", role: .cancel) {
+                pendingVaultProvider = nil
+                pendingEnableType = nil
+                pendingVaultTypeForCheck = nil
+                pendingVaultURLForCheck = nil
+                isSharedVaultEncryption = false
+            }
+            Button("Don't Encrypt") {
+                isSharedVaultEncryption = false
+                finalizeVaultSetup()
+            }
+            Button("Enable Encryption") {
+                isSharedVaultEncryption = true
+                encryptionMode = .setup(nil)
+                showEncryptionSheet = true
+            }
+        } message: {
+            Text(sharedVaultMessage)
+        }
+        .alert("Re-encrypt Existing Files?", isPresented: $showReEncryptionAlert) {
+            Button("Leave Unencrypted") {
+                finalizeVaultSetup()
+            }
+            Button("Re-encrypt All Files") {
+                reEncryptExistingFiles()
+            }
+        } message: {
+            Text("You have existing \(reEncryptionBackupType) files in this vault that are currently unencrypted.\n\nWould you like to re-encrypt all existing files? This will require re-uploading all files and may take some time depending on the number and size of files.\n\nNew files will be encrypted regardless of your choice.")
+        }
         .disabled(isWiping)
     }
     
@@ -299,7 +354,8 @@ struct SettingsView: View {
                 label: "Source Folder",
                 path: driveWatcher.sourceURL,
                 icon: "icloud",
-                action: driveWatcher.selectSourceFolder
+                action: driveWatcher.selectSourceFolder,
+                vaultStatus: getVaultStatus(driveWatcher.sourceURL)
             )
             
             // Show Desktop and Documents options if source is iCloud Drive
@@ -371,8 +427,12 @@ struct SettingsView: View {
                 get: { persistence.driveVaultType },
                 set: { newValue in
                     if newValue != persistence.driveVaultType {
-                        pendingVaultType = newValue
-                        showVaultSwitchAlert = true
+                        if persistence.isDriveEnabled {
+                            pendingVaultType = newValue
+                            showVaultSwitchAlert = true
+                        } else {
+                            persistence.driveVaultType = newValue
+                        }
                     }
                 }
             )) {
@@ -390,7 +450,8 @@ struct SettingsView: View {
                     action: {
                         pickLocalVault()
                     },
-                    isEncrypted: CryptoManager.shared.isConfigured
+                    isEncrypted: CryptoManager.shared.isConfigured,
+                    vaultStatus: getVaultStatus(driveWatcher.vaultURL)
                 )
             } else {
                 S3StatusRow(config: persistence.s3Config)
@@ -684,14 +745,17 @@ struct SettingsView: View {
             }
             .disabled(isWiping)
             
-            Group {
-                Section(header: Text("Destination")) {
+            Section(header: Text("Destination")) {
                     Picker("Vault Type", selection: Binding(
                         get: { persistence.photoVaultType },
                         set: { newValue in
                             if newValue != persistence.photoVaultType {
-                                pendingPhotoVaultType = newValue
-                                showPhotoVaultSwitchAlert = true
+                                if persistence.isPhotosEnabled {
+                                    pendingPhotoVaultType = newValue
+                                    showPhotoVaultSwitchAlert = true
+                                } else {
+                                    persistence.photoVaultType = newValue
+                                }
                             }
                         }
                     )) {
@@ -714,15 +778,30 @@ struct SettingsView: View {
                                 
                                 panel.begin { response in
                                     if response == .OK, let url = panel.url {
-                                        if url != photoWatcher.vaultURL {
-                                            pendingPhotoVaultURL = url
-                                            pendingPhotoVaultType = .local
-                                            showPhotoVaultSwitchAlert = true
+                                        if persistence.isPhotosEnabled && url != photoWatcher.vaultURL {
+                                            Task {
+                                                let isSameVault = await checkIfSameVault(newURL: url, currentURL: photoWatcher.vaultURL)
+                                                await MainActor.run {
+                                                    if isSameVault {
+                                                        print("Detected same vault at new location. Updating path without re-scan.")
+                                                        photoWatcher.vaultURL = url
+                                                        persistence.saveBookmark(for: url, type: .photoVault)
+                                                    } else {
+                                                        pendingPhotoVaultURL = url
+                                                        pendingPhotoVaultType = .local
+                                                        showPhotoVaultSwitchAlert = true
+                                                    }
+                                                }
+                                            }
+                                        } else if !persistence.isPhotosEnabled {
+                                            photoWatcher.vaultURL = url
+                                            persistence.saveBookmark(for: url, type: .photoVault)
                                         }
                                     }
                                 }
                             },
-                            isEncrypted: CryptoManager.shared.isConfigured
+                            isEncrypted: CryptoManager.shared.isConfigured,
+                            vaultStatus: getVaultStatus(photoWatcher.vaultURL)
                         )
                         Text("Anchor will organize photos by Year/Month automatically.")
                             .font(.caption)
@@ -736,8 +815,6 @@ struct SettingsView: View {
                 }
                 
                 photosScheduleSection
-            }
-            .disabled(!persistence.isPhotosEnabled)
         }
         .tabItem { Label("Photos", systemImage: "photo") }
         .tag(3)
@@ -806,6 +883,41 @@ struct SettingsView: View {
             }
         } message: {
             Text("Do you want Anchor to back up all photos currently in your library, or only new photos you take from now on?")
+        }
+        .alert("Configuration Required", isPresented: $showValidationAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(validationMessage)
+        }
+        .alert("Shared Vault Detected", isPresented: $showSharedVaultEncryptionAlert) {
+            Button("Cancel", role: .cancel) {
+                pendingVaultProvider = nil
+                pendingEnableType = nil
+                pendingVaultTypeForCheck = nil
+                pendingVaultURLForCheck = nil
+                isSharedVaultEncryption = false
+            }
+            Button("Don't Encrypt") {
+                isSharedVaultEncryption = false
+                finalizeVaultSetup()
+            }
+            Button("Enable Encryption") {
+                isSharedVaultEncryption = true
+                encryptionMode = .setup(nil)
+                showEncryptionSheet = true
+            }
+        } message: {
+            Text(sharedVaultMessage)
+        }
+        .alert("Re-encrypt Existing Files?", isPresented: $showReEncryptionAlert) {
+            Button("Leave Unencrypted") {
+                finalizeVaultSetup()
+            }
+            Button("Re-encrypt All Files") {
+                reEncryptExistingFiles()
+            }
+        } message: {
+            Text("You have existing \(reEncryptionBackupType) files in this vault that are currently unencrypted.\n\nWould you like to re-encrypt all existing files? This will require re-uploading all files and may take some time depending on the number and size of files.\n\nNew files will be encrypted regardless of your choice.")
         }
     }
     
@@ -879,11 +991,63 @@ struct SettingsView: View {
         
         panel.begin { response in
             if response == .OK, let url = panel.url {
-                Task {
-                    let provider = LocalVault(rootURL: url)
-                    await processVaultHandshake(provider: provider, type: .local, url: url)
+                if persistence.isDriveEnabled && url != driveWatcher.vaultURL {
+                    Task {
+                        let isSameVault = await checkIfSameVault(newURL: url, currentURL: driveWatcher.vaultURL)
+                        await MainActor.run {
+                            if isSameVault {
+                                print("Detected same vault at new location. Updating path without re-scan.")
+                                driveWatcher.vaultURL = url
+                                persistence.saveBookmark(for: url, type: .driveVault)
+                            } else {
+                                pendingVaultURL = url
+                                pendingVaultType = .local
+                                showVaultSwitchAlert = true
+                            }
+                        }
+                    }
+                } else if !persistence.isDriveEnabled {
+                    driveWatcher.vaultURL = url
+                    persistence.saveBookmark(for: url, type: .driveVault)
                 }
             }
+        }
+    }
+    
+    func checkIfSameVault(newURL: URL, currentURL: URL?) async -> Bool {
+        guard let currentURL = currentURL else { return false }
+        
+        if newURL == currentURL {
+            return true
+        }
+        
+        do {
+            let newVault = LocalVault(rootURL: newURL)
+            let currentVault = LocalVault(rootURL: currentURL)
+            
+            let newIdentity = try await newVault.loadIdentity()
+            let currentIdentity = try await currentVault.loadIdentity()
+            
+            if let newID = newIdentity, let currentID = currentIdentity {
+                return newID.vaultID == currentID.vaultID
+            }
+            
+            let newFiles = try await newVault.listAllFiles()
+            let currentFiles = try await currentVault.listAllFiles()
+            
+            if newFiles.isEmpty || currentFiles.isEmpty {
+                return false
+            }
+            
+            let newSet = Set(newFiles.sorted())
+            let currentSet = Set(currentFiles.sorted())
+            
+            let matchPercentage = Double(newSet.intersection(currentSet).count) / Double(max(newSet.count, currentSet.count))
+            
+            return matchPercentage > 0.8
+        } catch {
+            print("Error comparing vaults: \(error)")
+            return false
         }
     }
     
@@ -906,8 +1070,15 @@ struct SettingsView: View {
                         self.showEncryptionSheet = true
                     }
                 } else {
-                    self.encryptionMode = .setup(nil)
-                    self.showEncryptionSheet = true
+                    if let pendingType = self.pendingEnableType,
+                       self.isVaultSharedWithOtherBackup(type: pendingType, vaultURL: url, vaultType: type) {
+                        let otherBackup = pendingType == .drive ? "Photos" : "Drive"
+                        self.sharedVaultMessage = "This vault is already being used by \(otherBackup) backup without encryption.\n\nWould you like to enable encryption for both \(otherBackup) and \(pendingType == .drive ? "Drive" : "Photos")?"
+                        self.showSharedVaultEncryptionAlert = true
+                    } else {
+                        self.encryptionMode = .setup(nil)
+                        self.showEncryptionSheet = true
+                    }
                 }
             }
         } catch {
@@ -918,28 +1089,49 @@ struct SettingsView: View {
     func finalizeVaultSetup() {
         guard let type = pendingVaultTypeForCheck else { return }
         
-        if type == .s3 {
-            persistence.s3Config = tempS3Config
-            if pendingEnableType == .drive { persistence.driveVaultType = .s3 }
-            if pendingEnableType == .photos { persistence.photoVaultType = .s3 }
-        } else if type == .local, let url = pendingVaultURLForCheck {
-            if pendingEnableType == .drive {
-                persistence.driveVaultType = .local
-                driveWatcher.vaultURL = url
-                persistence.saveBookmark(for: url, type: .driveVault)
+        Task {
+            if type == .s3 {
+                await MainActor.run {
+                    persistence.s3Config = tempS3Config
+                    if pendingEnableType == .drive { persistence.driveVaultType = .s3 }
+                    if pendingEnableType == .photos { persistence.photoVaultType = .s3 }
+                }
+            } else if type == .local, let url = pendingVaultURLForCheck {
+                do {
+                    let vault = LocalVault(rootURL: url)
+                    let existingIdentity = try await vault.loadIdentity()
+                    
+                    if existingIdentity == nil {
+                        let newIdentity = VaultIdentity(vaultID: UUID())
+                        try await vault.saveIdentity(newIdentity)
+                        print("Created vault identity for non-encrypted vault: \(newIdentity.vaultID)")
+                    }
+                } catch {
+                    print("Error creating vault identity: \(error)")
+                }
+                
+                await MainActor.run {
+                    if pendingEnableType == .drive {
+                        persistence.driveVaultType = .local
+                        driveWatcher.vaultURL = url
+                        persistence.saveBookmark(for: url, type: .driveVault)
+                    }
+                    if pendingEnableType == .photos {
+                        persistence.photoVaultType = .local
+                        photoWatcher.vaultURL = url
+                        persistence.saveBookmark(for: url, type: .photoVault)
+                    }
+                }
             }
-            if pendingEnableType == .photos {
-                persistence.photoVaultType = .local
-                photoWatcher.vaultURL = url
-                persistence.saveBookmark(for: url, type: .photoVault)
+            
+            await MainActor.run {
+                if pendingEnableType == .drive || pendingEnableType == nil {
+                    driveWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck)
+                }
+                if pendingEnableType == .photos {
+                    photoWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck, importHistory: true)
+                }
             }
-        }
-        
-        if pendingEnableType == .drive || pendingEnableType == nil {
-            driveWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck)
-        }
-        if pendingEnableType == .photos {
-            photoWatcher.applyVaultSwitch(type: type, url: pendingVaultURLForCheck, importHistory: true)
         }
         
         if let pending = pendingEnableType {
@@ -985,16 +1177,28 @@ struct SettingsView: View {
         persistence.clearBookmark(type: .driveVault)
         persistence.clearBookmark(type: .desktopFolder)
         persistence.clearBookmark(type: .documentsFolder)
-        
+
+        persistence.driveVaultType = .local
+        persistence.backupMode = .basic
+        persistence.driveScheduleMode = .realtime
+        persistence.driveScheduleInterval = .hourly
+
+        ExclusionManager.shared.clearAllExclusions()
+
         if wipe {
             isWiping = true
             Task {
-                if let provider = try? await VaultFactory.getProvider(type: persistence.driveVaultType) {
-                    let prefix = (persistence.driveVaultType == .s3) ? "drive/" : ""
+                if let provider = try? await VaultFactory.getProvider(type: persistence.driveVaultType, bookmarkType: .driveVault) {
+                    let shouldUsePrefix = persistence.driveVaultType == .s3 || persistence.isPhotosEnabled
+                    let prefix = shouldUsePrefix ? "drive/" : ""
                     try? await provider.wipe(prefix: prefix)
                 }
                 
-                SQLiteLedger.shared.wipe()
+                if persistence.driveVaultType == .s3 || persistence.isPhotosEnabled {
+                    SQLiteLedger.shared.wipeDriveFiles()
+                } else {
+                    SQLiteLedger.shared.wipe()
+                }
                 
                 await MainActor.run { isWiping = false }
             }
@@ -1021,34 +1225,77 @@ struct SettingsView: View {
         // Clear photo vault configuration
         photoWatcher.vaultURL?.stopAccessingSecurityScopedResource()
         photoWatcher.vaultURL = nil
-        
+
         // Clear bookmark
         persistence.clearBookmark(type: .photoVault)
-        
+
+        persistence.photoVaultType = .local
+        persistence.photosScheduleMode = .realtime
+        persistence.photosScheduleInterval = .hourly
+
         if wipe {
             isWiping = true
             Task {
-                if let provider = try? await VaultFactory.getProvider(type: persistence.photoVaultType) {
-                    let prefix = (persistence.photoVaultType == .s3) ? "photos/" : ""
+                if let provider = try? await VaultFactory.getProvider(type: persistence.photoVaultType, bookmarkType: .photoVault) {
+                    let shouldUsePrefix = persistence.photoVaultType == .s3 || persistence.isDriveEnabled
+                    let prefix = shouldUsePrefix ? "photos/" : ""
                     try? await provider.wipe(prefix: prefix)
                 }
+                
+                if persistence.photoVaultType == .s3 || persistence.isDriveEnabled {
+                    SQLiteLedger.shared.wipePhotoFiles()
+                } else {
+                    SQLiteLedger.shared.wipe()
+                }
+                
                 await MainActor.run { isWiping = false }
             }
         }
     }
     
     func attemptToEnable(type: PendingEnableType) {
+        let vaultType = (type == .drive) ? persistence.driveVaultType : persistence.photoVaultType
+        let bookmarkType: PersistenceManager.BookmarkType = (type == .drive) ? .driveVault : .photoVault
+        
+        if type == .drive && driveWatcher.sourceURL == nil {
+            validationMessage = "Please select a source folder before enabling Drive backup."
+            showValidationAlert = true
+            return
+        }
+        
+        if vaultType == .local {
+            if type == .drive && driveWatcher.vaultURL == nil {
+                validationMessage = "Please select a vault folder before enabling Drive backup."
+                showValidationAlert = true
+                return
+            }
+            if type == .photos && photoWatcher.vaultURL == nil {
+                validationMessage = "Please select a vault folder before enabling Photo backup."
+                showValidationAlert = true
+                return
+            }
+        } else if vaultType == .s3 {
+            if !persistence.s3Config.isValid {
+                validationMessage = "Please configure S3 credentials in the Cloud tab before enabling backup."
+                showValidationAlert = true
+                return
+            }
+        }
+        
         Task {
-            let vaultType = (type == .drive) ? persistence.driveVaultType : persistence.photoVaultType
-            
-            guard let provider = try? await VaultFactory.getProvider(type: vaultType) else {
-                // show an error alert here.
+            guard let provider = try? await VaultFactory.getProvider(type: vaultType, bookmarkType: bookmarkType) else {
+                await MainActor.run {
+                    self.pendingEnableType = type
+                    proceedToStrategy(type: type)
+                }
                 return
             }
             
+            let vaultURL = (type == .drive) ? driveWatcher.vaultURL : photoWatcher.vaultURL
+            
             await MainActor.run {
                 self.pendingEnableType = type
-                Task { await processVaultHandshake(provider: provider, type: vaultType, url: nil) }
+                Task { await processVaultHandshake(provider: provider, type: vaultType, url: vaultURL) }
             }
         }
     }
@@ -1075,6 +1322,120 @@ struct SettingsView: View {
         driveWatcher.documentsURL?.stopAccessingSecurityScopedResource()
         driveWatcher.documentsURL = nil
         persistence.clearBookmark(type: .documentsFolder)
+    }
+    
+    func reEncryptExistingFiles() {
+        guard let pendingType = pendingEnableType else {
+            finalizeVaultSetup()
+            return
+        }
+        
+        let otherBackup = pendingType == .drive ? "Photos" : "Drive"
+        
+        if otherBackup == "Drive" {
+            SQLiteLedger.shared.markAllDriveFilesForReUpload()
+            driveWatcher.isRunning = false
+            NSFileCoordinator.removeFilePresenter(driveWatcher)
+        } else {
+            SQLiteLedger.shared.markAllPhotoFilesForReUpload()
+            photoWatcher.isRunning = false
+        }
+        
+        finalizeVaultSetup()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if otherBackup == "Drive" {
+                self.driveWatcher.startWatching()
+            } else if otherBackup == "Photos" {
+                self.photoWatcher.startWatching()
+            }
+        }
+    }
+    
+    func areVaultsSame(url1: URL?, url2: URL?) -> Bool {
+        guard let url1 = url1, let url2 = url2 else { return false }
+        return url1.path == url2.path
+    }
+    
+    func isVaultInTrash(_ url: URL?) -> Bool {
+        guard let url = url else { return false }
+        // Check user's actual trash, not the sandboxed container trash
+        let username = NSUserName()
+        let userTrashPath = "/Users/\(username)/.Trash"
+        return url.path.hasPrefix(userTrashPath)
+    }
+    
+    func isVaultAccessible(_ url: URL?) -> Bool {
+        guard let url = url else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+    
+    enum VaultStatus {
+        case connected
+        case inTrash
+        case missing
+        case notSet
+    }
+    
+    func getVaultStatus(_ url: URL?) -> VaultStatus {
+        guard let url = url else { return .notSet }
+        
+        if isVaultInTrash(url) {
+            return .inTrash
+        }
+        
+        if !isVaultAccessible(url) {
+            return .missing
+        }
+        
+        return .connected
+    }
+    
+    func clearVaultIfInTrash(type: PendingEnableType) {
+        if type == .drive {
+            // Clear vault if in trash
+            if isVaultInTrash(driveWatcher.vaultURL) {
+                PersistenceManager.shared.clearBookmark(type: .driveVault)
+                driveWatcher.vaultURL = nil
+                print("Cleared Drive vault URL - folder was in trash")
+            }
+            
+            // Clear source if in trash
+            if isVaultInTrash(driveWatcher.sourceURL) {
+                PersistenceManager.shared.clearBookmark(type: .driveSource)
+                driveWatcher.sourceURL = nil
+                print("Cleared Drive source URL - folder was in trash")
+            }
+        } else {
+            // Clear vault if in trash
+            if isVaultInTrash(photoWatcher.vaultURL) {
+                PersistenceManager.shared.clearBookmark(type: .photoVault)
+                photoWatcher.vaultURL = nil
+                print("Cleared Photo vault URL - folder was in trash")
+            }
+        }
+    }
+    
+    func areS3VaultsSame() -> Bool {
+        return persistence.driveVaultType == .s3 && 
+               persistence.photoVaultType == .s3 &&
+               persistence.s3Config.isValid
+    }
+    
+    func isVaultSharedWithOtherBackup(type: PendingEnableType, vaultURL: URL?, vaultType: VaultType) -> Bool {
+        if vaultType == .s3 {
+            if type == .drive {
+                return areS3VaultsSame() && persistence.isPhotosEnabled
+            } else {
+                return areS3VaultsSame() && persistence.isDriveEnabled
+            }
+        } else {
+            if type == .drive {
+                return areVaultsSame(url1: vaultURL, url2: photoWatcher.vaultURL) && persistence.isPhotosEnabled
+            } else {
+                return areVaultsSame(url1: vaultURL, url2: driveWatcher.vaultURL) && persistence.isDriveEnabled
+            }
+        }
     }
         
     struct ExclusionToken: View {
@@ -1142,24 +1503,52 @@ struct SettingsView: View {
         let icon: String
         let action: () -> Void
         var isEncrypted: Bool = false
+        var vaultStatus: VaultStatus = .notSet
+        
+        private func formatPath(_ url: URL) -> String {
+            let fullPath = url.path
+            
+            if let range = fullPath.range(of: "/Mobile Documents/com~apple~CloudDocs") {
+                let afterICloud = fullPath[range.upperBound...]
+                if afterICloud.isEmpty || afterICloud == "/" {
+                    return "iCloud Drive"
+                } else {
+                    return "iCloud Drive\(afterICloud)"
+                }
+            }
+            
+            return fullPath
+        }
         
         var body: some View {
             HStack {
                 Image(systemName: icon)
                     .frame(width: 20)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(vaultStatus == .connected ? .secondary : .red)
                 
                 VStack(alignment: .leading) {
                     Text(label)
                         .fontWeight(.medium)
-                    if let p = path {
-                        Text("\(p.path) \(isEncrypted ? " - Encryption Enabled" : "")")
+                    
+                    switch vaultStatus {
+                    case .connected:
+                        if let p = path {
+                            Text("\(formatPath(p))\(isEncrypted ? " - Encryption Enabled" : "")")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .truncationMode(.middle)
+                                .lineLimit(1)
+                        }
+                    case .inTrash:
+                        Text("Vault folder was deleted (in Trash)")
                             .font(.caption)
-                            .foregroundColor(.secondary)
-                            .truncationMode(.middle)
-                            .lineLimit(1)
-                    } else {
-                        Text("Not Set")
+                            .foregroundColor(.red)
+                    case .missing:
+                        Text("Vault folder not found (disconnected or moved)")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    case .notSet:
+                        Text("No vault selected - choose a destination folder")
                             .font(.caption)
                             .foregroundColor(.red)
                     }

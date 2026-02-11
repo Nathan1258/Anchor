@@ -28,6 +28,8 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
     @Published var logs: [LogEntry] = []
     
     private let ledger = SQLiteLedger.shared
+    private let energyManager = EnergyManager.shared
+    private let webhookManager = WebhookManager.shared
     private var vaultProvider: VaultProvider?
     private var vaultMonitor: VaultMonitor?
     private var sourceMonitor: VaultMonitor?
@@ -942,6 +944,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                             body: "Processed \(processed) files. Anchor is now monitoring for changes.",
                             type: .backupComplete
                         )
+                        
+                        WebhookManager.shared.send(
+                            event: .backupComplete,
+                            backupType: .drive,
+                            filesProcessed: processed
+                        )
                     }
                 } else {
                     self.status = .disabled
@@ -1053,11 +1061,18 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         Task {
             defer { try? FileManager.default.removeItem(at: tempSnapshotURL) }
             
+            await MainActor.run {
+                energyManager.beginBackup()
+            }
+            
             await TransferQueue.shared.enqueue()
             
             defer {
                 Task {
                     await TransferQueue.shared.taskFinished()
+                    await MainActor.run {
+                        energyManager.endBackup()
+                    }
                 }
             }
             
@@ -1111,6 +1126,12 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                                 title: "Backup Failed: Disk Full",
                                 body: "Anchor requires \(sizeStr) to back up '\(snapshotFile.lastPathComponent)'. Sync has been paused.",
                                 type: .vaultIssue
+                            )
+                            
+                            WebhookManager.shared.send(
+                                event: .backupFailed,
+                                backupType: .drive,
+                                errorMessage: "Disk full: needed \(sizeStr)"
                             )
                         }
                     } else {

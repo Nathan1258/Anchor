@@ -34,6 +34,7 @@ class PersistenceManager: ObservableObject {
     
     private let kNotifyBackupComplete = "anchor_notify_backup_complete"
     private let kNotifyVaultIssue = "anchor_notify_vault_issue"
+    private let kWebhookURL = "anchor_webhook_url"
     
     private let kIgnoredExtensions = "anchor_ignore_ext"
     private let kIgnoredFolders = "anchor_ignore_folders"
@@ -99,6 +100,11 @@ class PersistenceManager: ObservableObject {
             return defaults.bool(forKey: kNotifyVaultIssue)
         }
         set { objectWillChange.send(); defaults.set(newValue, forKey: kNotifyVaultIssue) }
+    }
+    
+    var webhookURL: String {
+        get { defaults.string(forKey: kWebhookURL) ?? "" }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookURL) }
     }
     
     var s3Config: S3Config {

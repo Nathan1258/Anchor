@@ -25,6 +25,8 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     private var vaultProvider: VaultProvider?
     private var vaultMonitor: VaultMonitor?
+    private let energyManager = EnergyManager.shared
+    private let webhookManager = WebhookManager.shared
     
     private let exportQueue = DispatchQueue(label: "com.anchor.photoExport", qos: .utility)
     private var cancellables = Set<AnyCancellable>()
@@ -568,6 +570,12 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     body: "Your entire library has been scanned and backed up.",
                     type: .backupComplete
                 )
+                
+                WebhookManager.shared.send(
+                    event: .backupComplete,
+                    backupType: .photos,
+                    filesProcessed: self.sessionSavedCount
+                )
             }
         }
     }
@@ -651,16 +659,26 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     return
                 }
                 
-                Task {
+                Task { [weak self] in
+                    guard let self = self else { return }
+                    
+                    await MainActor.run {
+                        self.energyManager.beginBackup()
+                    }
+                    
                     await TransferQueue.shared.enqueue()
                     
                     var finalSource = tempFileURL
                     var finalRelativePath = relativePath
                     var wasEncrypted = false
                     
+                    let energyManager = self.energyManager
                     defer {
                         Task {
                             await TransferQueue.shared.taskFinished()
+                            await MainActor.run {
+                                energyManager.endBackup()
+                            }
                         }
                     }
                     
@@ -708,6 +726,14 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                 body: "Not enough disk space to encrypt photos. Free up space to continue.",
                                 type: .vaultIssue
                             )
+                            
+                            await MainActor.run {
+                                WebhookManager.shared.send(
+                                    event: .backupFailed,
+                                    backupType: .photos,
+                                    errorMessage: "Insufficient disk space for photo encryption"
+                                )
+                            }
                         } else {
                             await Task { @MainActor in
                                 self.log("Encryption Error: \(filename) - \(error.localizedDescription)")
@@ -799,11 +825,18 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 }
             }
             
+            await MainActor.run {
+                self.energyManager.beginBackup()
+            }
+            
             await TransferQueue.shared.enqueue()
             
             defer {
-                Task {
+                Task { [weak self] in
                     await TransferQueue.shared.taskFinished()
+                    await MainActor.run {
+                        self?.energyManager.endBackup()
+                    }
                 }
             }
             

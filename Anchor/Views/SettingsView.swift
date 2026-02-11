@@ -24,6 +24,10 @@ struct SettingsView: View {
     @State private var connectionTestMessage: String? = nil
     @State private var connectionTestSuccess: Bool = false
     
+    @State private var isTestingWebhook = false
+    @State private var webhookTestMessage: String? = nil
+    @State private var webhookTestSuccess: Bool = false
+    
     @State private var showVaultSwitchAlert = false
     @State private var pendingVaultType: VaultType?
     @State private var pendingVaultURL: URL?
@@ -137,6 +141,14 @@ struct SettingsView: View {
                 Toggle("Launch at Login", isOn: $settings.launchAtLogin)
                     .toggleStyle(.switch)
                 Text("Automatically start Anchor when you log in.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Section(header: Text("Energy Management")) {
+                Toggle("Prevent Sleep while Backing Up", isOn: $settings.preventSleepWhileBackingUp)
+                    .toggleStyle(.switch)
+                Text("Keeps your Mac awake during active backups to ensure large uploads complete successfully.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -934,6 +946,40 @@ struct SettingsView: View {
                 Toggle("Notify when Backup Complete", isOn: $persistence.notifyBackupComplete)
                 Toggle("Notify on Vault Issues", isOn: $persistence.notifyVaultIssue)
             }
+            
+            Section(
+                header: Text("Webhook Integration"),
+                footer: Text("Send JSON notifications to external services when backups complete or fail. Compatible with Home Assistant, Discord, Uptime Kuma, and more.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            ) {
+                TextField("Webhook URL", text: $persistence.webhookURL)
+                    .autocorrectionDisabled()
+                    .textContentType(.URL)
+                
+                HStack {
+                    Button(action: testWebhook) {
+                        if isTestingWebhook {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Test Webhook")
+                        }
+                    }
+                    .disabled(persistence.webhookURL.isEmpty || isTestingWebhook)
+                    
+                    Spacer()
+                }
+                
+                if let message = webhookTestMessage {
+                    HStack {
+                        Image(systemName: webhookTestSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(webhookTestSuccess ? .green : .red)
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(webhookTestSuccess ? .green : .red)
+                    }
+                }
+            }
         }
         .tabItem { Label("Notifications", systemImage: "bell.badge") }
         .tag(4)
@@ -963,6 +1009,23 @@ struct SettingsView: View {
                     self.connectionTestMessage = "Connection Failed: \(error.localizedDescription)"
                     self.isTestingConnection = false
                 }
+            }
+        }
+    }
+    
+    private func testWebhook() {
+        guard !persistence.webhookURL.isEmpty else { return }
+        
+        isTestingWebhook = true
+        webhookTestMessage = nil
+        
+        Task {
+            let result = await WebhookManager.shared.testWebhook(url: persistence.webhookURL)
+            
+            await MainActor.run {
+                self.webhookTestSuccess = result.success
+                self.webhookTestMessage = result.message
+                self.isTestingWebhook = false
             }
         }
     }

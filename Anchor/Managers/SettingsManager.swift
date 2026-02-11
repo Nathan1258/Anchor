@@ -17,6 +17,8 @@ class SettingsManager: ObservableObject {
             updateLaunchAtLogin()
         }
     }
+    
+    @AppStorage("preventSleepWhileBackingUp") var preventSleepWhileBackingUp = true
         
     private func updateLaunchAtLogin() {
         if #available(macOS 13.0, *) {

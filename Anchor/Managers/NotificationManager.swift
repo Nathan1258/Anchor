@@ -40,6 +40,15 @@ class NotificationManager {
         )
         
         UNUserNotificationCenter.current().add(request)
+        
+        Task { @MainActor in
+            switch type {
+            case .backupComplete:
+                break
+            case .vaultIssue:
+                WebhookManager.shared.send(event: .vaultIssue, errorMessage: body)
+            }
+        }
     }
     
     enum NotificationType {

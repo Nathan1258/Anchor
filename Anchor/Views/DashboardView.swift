@@ -30,36 +30,7 @@ struct DashboardView: View {
             )
             .ignoresSafeArea()
             
-            VStack(spacing: 0) {
-                GlassEffectContainer(spacing: 16) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Anchor")
-                                .font(.title2)
-                                .fontWeight(.bold)
-                            Text("Backup Monitor")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        
-                        Spacer()
-                        
-                        Button(action: { openWindow(id: "settings") }) {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 16))
-                        }
-                        .buttonStyle(.glass)
-                        .help("Open Settings")
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
-                    .glassEffect()
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
-                
-                monitorView
-            }
+            monitorView
         }
         .frame(minWidth: 600, minHeight: 400)
     }
@@ -84,7 +55,6 @@ struct DashboardView: View {
                         )
                     }
                     
-                    // Vault status warnings
                     if persistence.isDriveEnabled && driveWatcher.status == .waitingForVault {
                         StatusBanner(
                             text: "Drive Vault Folder Not Found",
@@ -214,10 +184,7 @@ struct DashboardView: View {
                         totalFiles: integrityManager.totalFiles,
                         isVerifying: integrityManager.isVerifying,
                         onVerifyNow: {
-                            integrityManager.updateStats()
-                            if !integrityManager.isVerifying {
-                                integrityManager.startVerification()
-                            }
+                            integrityManager.verifyNow()
                         }
                     )
                     .glassEffect(in: .rect(cornerRadius: 16))
@@ -293,82 +260,71 @@ struct EngineStatusColumn: View {
     let onRestore: (() -> Void)?
     
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 12) {
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
                 ZStack {
                     Circle()
                         .fill(isRunning ? statusColor.opacity(0.15) : Color.gray.opacity(0.1))
-                        .frame(width: 80, height: 80)
+                        .frame(width: 60, height: 60)
                     
                     Image(systemName: icon)
-                        .font(.system(size: 36))
+                        .font(.system(size: 28))
                         .foregroundStyle(isRunning ? statusColor : .secondary)
                         .symbolEffect(.pulse, isActive: isRunning)
                 }
                 
                 VStack(spacing: 4) {
                     Text(title)
-                        .font(.title3)
+                        .font(.headline)
                         .fontWeight(.semibold)
                     
-                    GlassEffectContainer(spacing: 8) {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(statusColor)
-                                .frame(width: 6, height: 6)
-                            Text(statusText)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .glassEffect()
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 5, height: 5)
+                        Text(statusText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
-            .padding(.top, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
             
-            Spacer()
-            
-            VStack(spacing: 16) {
+            HStack(spacing: 12) {
                 MetricRow(value: primaryMetric, label: primaryLabel, isRunning: isRunning)
                 MetricRow(value: secondaryMetric, label: secondaryLabel, isRunning: isRunning)
             }
+            .padding(.horizontal, 12)
             
             if isRunning && !lastActivity.isEmpty {
-                VStack(spacing: 4) {
-                    Text("Recent Activity")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .textCase(.uppercase)
-                    
-                    Text(lastActivity)
-                        .font(.caption)
-                        .monospaced()
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 12)
+                Text(lastActivity)
+                    .font(.caption2)
+                    .monospaced()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
             }
             
             Spacer()
             
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 if !isConfigured {
                     Button("Configure in Settings") { onConfigure() }
                         .buttonStyle(.glass)
-                        .controlSize(.large)
+                        .controlSize(.small)
                 } else if !isRunning {
                     Button("Start Monitor") { onStart() }
                         .buttonStyle(.glassProminent)
-                        .controlSize(.large)
+                        .controlSize(.small)
                 } else {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Engine Running")
                             .font(.caption)
+                            .foregroundStyle(.green)
+                        Text("Running")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -376,14 +332,15 @@ struct EngineStatusColumn: View {
                 if let onRestore = onRestore, isConfigured {
                     Button(action: onRestore) {
                         Label("Browse & Restore", systemImage: "clock.arrow.circlepath")
+                            .font(.caption)
                     }
                     .buttonStyle(.glass)
-                    .controlSize(.small)
+                    .controlSize(.mini)
                 }
             }
-            .padding(.bottom, 20)
+            .padding(.bottom, 16)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 320, maxHeight: 320)
     }
 }
 
@@ -393,22 +350,20 @@ struct MetricRow: View {
     let isRunning: Bool
     
     var body: some View {
-        HStack {
+        VStack(spacing: 4) {
+            Text(value)
+                .font(.title)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+                .foregroundStyle(isRunning ? .primary : .secondary)
+            
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
-            
-            Spacer()
-            
-            Text(value)
-                .font(.title2)
-                .fontWeight(.medium)
-                .monospacedDigit()
-                .foregroundStyle(isRunning ? .primary : .secondary)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(nsColor: .controlBackgroundColor).opacity(0.3))

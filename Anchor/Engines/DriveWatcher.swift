@@ -278,6 +278,15 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         if PersistenceManager.shared.driveScheduleMode == BackupScheduleMode.realtime {
             DispatchQueue.main.async { 
                 self.status = isNew ? .newItem : .changeDetected
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self = self else { return }
+                    if case .newItem = self.status {
+                        self.status = .monitoring
+                    } else if case .changeDetected = self.status {
+                        self.status = .monitoring
+                    }
+                }
             }
             log("\(isNew ? "New Item" : "Change") Detected: \(url.lastPathComponent)")
             debounceFileEvent(at: url)
@@ -494,11 +503,18 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
         Task{
             do{
                 try await provider.deleteFile(relativePath: vaultPath)
-                ledger.removeEntry(relativePath: relativePath)
+                ledger.removeEntry(relativePath: vaultPath)
                 
                 log("Synced Deletion: \(relativePath)")
                 DispatchQueue.main.async {
                     self.status = .deleted(filename: (relativePath as NSString).lastPathComponent)
+                    
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                        guard let self = self else { return }
+                        if case .deleted = self.status {
+                            self.status = .monitoring
+                        }
+                    }
                 }
             } catch {
                 log("Failed to delete vault copy: \(error.localizedDescription)")
@@ -1104,12 +1120,19 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                         return false
                     }
                     
-                    self.ledger.markAsProcessed(relativePath: relativePath, genID: genID, contentHash: contentHash)
+                    self.ledger.markAsProcessed(relativePath: uploadPath, genID: genID, contentHash: contentHash)
                     
                     await MainActor.run {
                         self.sessionVaultedCount += 1
                         self.lastSyncTime = Date()
                         self.status = .vaulted(filename: fileURL.lastPathComponent)
+                        
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                            guard let self = self else { return }
+                            if case .vaulted = self.status {
+                                self.status = .monitoring
+                            }
+                        }
                     }
                 }catch let error as VaultError {
                     self.ledger.incrementFailureCount(relativePath: relativePath, genID: genID)

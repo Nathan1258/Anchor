@@ -47,10 +47,6 @@ class IntegrityManager: ObservableObject {
         
         isRunning = true
         
-        Task { @MainActor in
-            self.isVerifying = true
-        }
-        
         print("IntegrityManager: Starting background verification")
         
         verificationTask = Task.detached(priority: .utility) { [weak self] in
@@ -70,70 +66,86 @@ class IntegrityManager: ObservableObject {
         print("IntegrityManager: Stopped verification")
     }
     
+    func verifyNow() {
+        Task {
+            await performVerificationCycle()
+        }
+    }
+    
     private func verificationLoop() async {
         while isRunning {
+            await performVerificationCycle()
+            
             do {
-                let driveVaultType = PersistenceManager.shared.driveVaultType
-                let photoVaultType = PersistenceManager.shared.photoVaultType
-                let networkStatus = NetworkMonitor.shared.status
-                
-                if (driveVaultType == .s3 || photoVaultType == .s3) && networkStatus != .verified {
-                    print("IntegrityManager: Network offline, waiting for connection...")
-                    try await Task.sleep(for: .seconds(60))
-                    continue
-                }
-                
-                let driveProvider = try? await VaultFactory.getProvider(type: driveVaultType, bookmarkType: .driveVault)
-                let photoProvider = try? await VaultFactory.getProvider(type: photoVaultType, bookmarkType: .photoVault)
-                
-                if driveProvider == nil && photoProvider == nil {
-                    print("IntegrityManager: No vaults available, waiting...")
-                    try await Task.sleep(for: .seconds(300))
-                    continue
-                }
-                
-                let filesToVerify = ledger.getFilesForAuditing(limit: 50)
-                
-                if filesToVerify.isEmpty {
-                    print("IntegrityManager: No files need verification, waiting...")
-                    try await Task.sleep(for: .seconds(3600))
-                    continue
-                }
-                
-                print("IntegrityManager: Verifying \(filesToVerify.count) files")
-                
-                for (path, expectedHash) in filesToVerify {
-                    guard isRunning else { break }
-                    
-                    let provider: VaultProvider?
-                    if path.hasPrefix("drive/") {
-                        provider = driveProvider
-                    } else if path.hasPrefix("photos/") {
-                        provider = photoProvider
-                    } else {
-                        provider = driveProvider
-                    }
-                    
-                    guard let vaultProvider = provider else {
-                        print("IntegrityManager: No provider for \(path)")
-                        continue
-                    }
-                    
-                    _ = await verifyFile(path: path, expectedHash: expectedHash, provider: vaultProvider)
-                    
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                
-                await MainActor.run {
-                    self.updateStats()
-                }
-                
                 try await Task.sleep(for: .seconds(60))
-                
             } catch {
-                print("IntegrityManager: Error in verification loop: \(error)")
-                try? await Task.sleep(for: .seconds(300))
+                print("IntegrityManager: Sleep interrupted")
             }
+        }
+    }
+    
+    private func performVerificationCycle() async {
+        await MainActor.run {
+            self.isVerifying = true
+        }
+        
+        defer {
+            Task { @MainActor in
+                self.isVerifying = false
+            }
+        }
+        
+        let driveVaultType = PersistenceManager.shared.driveVaultType
+        let photoVaultType = PersistenceManager.shared.photoVaultType
+        let networkStatus = NetworkMonitor.shared.status
+        
+        if (driveVaultType == .s3 || photoVaultType == .s3) && networkStatus != .verified {
+            print("IntegrityManager: Network offline, skipping verification cycle")
+            return
+        }
+        
+        let driveProvider = try? await VaultFactory.getProvider(type: driveVaultType, bookmarkType: .driveVault)
+        let photoProvider = try? await VaultFactory.getProvider(type: photoVaultType, bookmarkType: .photoVault)
+        
+        if driveProvider == nil && photoProvider == nil {
+            print("IntegrityManager: No vaults available, skipping verification cycle")
+            return
+        }
+        
+        let filesToVerify = ledger.getFilesForAuditing(limit: 50)
+        
+        if filesToVerify.isEmpty {
+            print("IntegrityManager: No files need verification")
+            await MainActor.run {
+                self.updateStats()
+            }
+            return
+        }
+        
+        print("IntegrityManager: Verifying \(filesToVerify.count) files")
+        
+        for (path, expectedHash) in filesToVerify {
+            let provider: VaultProvider?
+            if path.hasPrefix("drive/") {
+                provider = driveProvider
+            } else if path.hasPrefix("photos/") {
+                provider = photoProvider
+            } else {
+                provider = driveProvider
+            }
+            
+            guard let vaultProvider = provider else {
+                print("IntegrityManager: No provider for \(path)")
+                continue
+            }
+            
+            _ = await verifyFile(path: path, expectedHash: expectedHash, provider: vaultProvider)
+            
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        
+        await MainActor.run {
+            self.updateStats()
         }
     }
     
@@ -206,11 +218,28 @@ class IntegrityManager: ObservableObject {
                     body: "File '\(path)' has a hash mismatch. Backup may be corrupted.",
                     type: .vaultIssue
                 )
+                
+                Task { @MainActor in
+                    WebhookManager.shared.send(
+                        event: .integrityMismatch,
+                        errorMessage: "File '\(path)' has a hash mismatch. Expected: \(expectedHash), Remote: \(remoteHash)"
+                    )
+                }
+                
                 return false
             }
             
         } catch {
             print("IntegrityManager: Error verifying \(path): \(error)")
+            ledger.updateVerificationStatus(path: path, status: 3, date: Date())
+            
+            Task { @MainActor in
+                WebhookManager.shared.send(
+                    event: .integrityError,
+                    errorMessage: "Error verifying '\(path)': \(error.localizedDescription)"
+                )
+            }
+            
             return false
         }
     }

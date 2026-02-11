@@ -10,14 +10,39 @@ import SwiftUI
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowObservers: [NSObjectProtocol] = []
     
+    var driveWatcher: DriveWatcher?
+    var photoWatcher: PhotoWatcher?
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupWindowObservers()
+        IntegrityManager.shared.startVerification()
+        
+        Task { @MainActor in
+            if PersistenceManager.shared.metricsServerEnabled {
+                MetricsServer.shared.port = UInt16(PersistenceManager.shared.metricsServerPort)
+                MetricsServer.shared.start()
+            }
+        }
+    }
+    
+    func setWatchers(drive: DriveWatcher, photo: PhotoWatcher) {
+        self.driveWatcher = drive
+        self.photoWatcher = photo
+        
+        Task { @MainActor in
+            MetricsServer.shared.driveWatcher = drive
+            MetricsServer.shared.photoWatcher = photo
+        }
     }
     
     func applicationWillTerminate(_ notification: Notification) {
         SQLiteLedger.shared.performCheckpoint()
         windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        
+        Task { @MainActor in
+            MetricsServer.shared.stop()
+        }
     }
     
     private func setupWindowObservers() {
@@ -74,6 +99,9 @@ struct AnchorApp: App {
             Main()
                 .environmentObject(driveWatcher)
                 .environmentObject(photosWatcher)
+                .onAppear {
+                    appDelegate.setWatchers(drive: driveWatcher, photo: photosWatcher)
+                }
         } label: {
             Label {
                 Text("Anchor")
@@ -132,7 +160,7 @@ struct AnchorApp: App {
             return .systemGreen
         }
         
-        return .systemOrange
+        return .systemGray
     }
     
     private func createMenuBarIcon() -> NSImage {

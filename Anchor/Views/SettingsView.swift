@@ -153,6 +153,42 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
             
+            Section(
+                header: Text("Network Guard"),
+                footer: Text("Rate limiting and hotspot protection to prevent bandwidth saturation and excessive data usage on expensive networks.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            ) {
+                Toggle("Pause on Hotspots & Expensive Networks", isOn: $persistence.pauseOnExpensiveNetwork)
+                    .toggleStyle(.switch)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Max Upload Speed")
+                        Spacer()
+                        if persistence.maxUploadSpeedMBps == 0 {
+                            Text("Unlimited")
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text(String(format: "%.0f MB/s", persistence.maxUploadSpeedMBps))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Slider(value: $persistence.maxUploadSpeedMBps, in: 0...100, step: 5)
+                    
+                    HStack {
+                        Text("0 MB/s")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("100 MB/s")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            
             Section(header: Text("Troubleshooting")) {
                 HStack {
                     Button("Rebuild Restore Index") {
@@ -938,7 +974,7 @@ struct SettingsView: View {
         pendingPhotoVaultURL = nil
     }
     
-    // MARK: - Notifications Tab
+    // MARK: - Integrations Tab
     
     private var notificationsTab: some View {
         Form {
@@ -949,9 +985,31 @@ struct SettingsView: View {
             
             Section(
                 header: Text("Webhook Integration"),
-                footer: Text("Send JSON notifications to external services when backups complete or fail. Compatible with Home Assistant, Discord, Uptime Kuma, and more.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                footer: VStack(alignment: .leading, spacing: 8) {
+                    Text("Send JSON notifications to external services when backups complete or fail. Compatible with Home Assistant, Discord, Uptime Kuma, and more.")
+                    
+                    Text("Payload Format:")
+                        .fontWeight(.semibold)
+                        .padding(.top, 4)
+                    
+                    Text("""
+                    {
+                      "event": "backup_complete",
+                      "timestamp": "2026-02-11T12:34:56Z",
+                      "backupType": "drive",
+                      "filesProcessed": 42,
+                      "errorMessage": null,
+                      "hostname": "MacBook Pro",
+                      "appVersion": "1.0"
+                    }
+                    """)
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(4)
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
             ) {
                 TextField("Webhook URL", text: $persistence.webhookURL)
                     .autocorrectionDisabled()
@@ -980,8 +1038,87 @@ struct SettingsView: View {
                     }
                 }
             }
+            
+            Section(
+                header: Text("Webhook Events"),
+                footer: Text("Choose which events trigger webhook notifications.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            ) {
+                Toggle("Backup Completed", isOn: $persistence.webhookBackupComplete)
+                Toggle("Backup Failed", isOn: $persistence.webhookBackupFailed)
+                Toggle("Vault Issues", isOn: $persistence.webhookVaultIssue)
+                Toggle("Integrity Mismatch Detected", isOn: $persistence.webhookIntegrityMismatch)
+                Toggle("Integrity Verification Errors", isOn: $persistence.webhookIntegrityError)
+            }
+            
+            Section(
+                header: Text("Dashboard Feed"),
+                footer: VStack(alignment: .leading, spacing: 8) {
+                    Text("Run a local HTTP server that exposes backup metrics at /metrics endpoint. Perfect for Grafana, Home Assistant, and other monitoring tools.")
+                    
+                    Text("Example Response:")
+                        .fontWeight(.semibold)
+                        .padding(.top, 4)
+                    
+                    Text("""
+                    {
+                      "status": "running",
+                      "lastSuccessfulBackup": 1739270400,
+                      "filesPending": 0,
+                      "integrityHealth": "100%",
+                      "filesVaulted": 1234,
+                      "timestamp": 1739270400
+                    }
+                    """)
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(4)
+                    
+                    if persistence.metricsServerEnabled {
+                        HStack(spacing: 4) {
+                            Image(systemName: "link")
+                                .foregroundColor(.blue)
+                            Link("http://localhost:\(persistence.metricsServerPort)/metrics", 
+                                 destination: URL(string: "http://localhost:\(persistence.metricsServerPort)/metrics")!)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            ) {
+                Toggle("Enable Metrics Server", isOn: $persistence.metricsServerEnabled)
+                    .onChange(of: persistence.metricsServerEnabled) { _, newValue in
+                        if newValue {
+                            MetricsServer.shared.start()
+                        } else {
+                            MetricsServer.shared.stop()
+                        }
+                    }
+                
+                HStack {
+                    Text("Port")
+                    Spacer()
+                    TextField("Port", value: $persistence.metricsServerPort, format: .number)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 80)
+                        .disabled(persistence.metricsServerEnabled)
+                }
+                
+                if persistence.metricsServerEnabled {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Server running on port \(persistence.metricsServerPort)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
         }
-        .tabItem { Label("Notifications", systemImage: "bell.badge") }
+        .tabItem { Label("Integrations", systemImage: "chart.line.uptrend.xyaxis") }
         .tag(4)
     }
     

@@ -35,6 +35,11 @@ class PersistenceManager: ObservableObject {
     private let kNotifyBackupComplete = "anchor_notify_backup_complete"
     private let kNotifyVaultIssue = "anchor_notify_vault_issue"
     private let kWebhookURL = "anchor_webhook_url"
+    private let kWebhookBackupComplete = "anchor_webhook_backup_complete"
+    private let kWebhookBackupFailed = "anchor_webhook_backup_failed"
+    private let kWebhookVaultIssue = "anchor_webhook_vault_issue"
+    private let kWebhookIntegrityMismatch = "anchor_webhook_integrity_mismatch"
+    private let kWebhookIntegrityError = "anchor_webhook_integrity_error"
     
     private let kIgnoredExtensions = "anchor_ignore_ext"
     private let kIgnoredFolders = "anchor_ignore_folders"
@@ -48,6 +53,12 @@ class PersistenceManager: ObservableObject {
     private let kDriveScheduleInterval = "anchor_drive_schedule_interval"
     private let kPhotosScheduleMode = "anchor_photos_schedule_mode"
     private let kPhotosScheduleInterval = "anchor_photos_schedule_interval"
+    
+    private let kMaxUploadSpeedMBps = "anchor_max_upload_speed_mbps"
+    private let kPauseOnExpensiveNetwork = "anchor_pause_on_expensive_network"
+    
+    private let kMetricsServerEnabled = "anchor_metrics_server_enabled"
+    private let kMetricsServerPort = "anchor_metrics_server_port"
     
     
     var backupMode: BackupMode {
@@ -105,6 +116,78 @@ class PersistenceManager: ObservableObject {
     var webhookURL: String {
         get { defaults.string(forKey: kWebhookURL) ?? "" }
         set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookURL) }
+    }
+    
+    var webhookBackupComplete: Bool {
+        get {
+            guard defaults.object(forKey: kWebhookBackupComplete) != nil else { return true }
+            return defaults.bool(forKey: kWebhookBackupComplete)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookBackupComplete) }
+    }
+    
+    var webhookBackupFailed: Bool {
+        get {
+            guard defaults.object(forKey: kWebhookBackupFailed) != nil else { return true }
+            return defaults.bool(forKey: kWebhookBackupFailed)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookBackupFailed) }
+    }
+    
+    var webhookVaultIssue: Bool {
+        get {
+            guard defaults.object(forKey: kWebhookVaultIssue) != nil else { return true }
+            return defaults.bool(forKey: kWebhookVaultIssue)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookVaultIssue) }
+    }
+    
+    var webhookIntegrityMismatch: Bool {
+        get {
+            guard defaults.object(forKey: kWebhookIntegrityMismatch) != nil else { return true }
+            return defaults.bool(forKey: kWebhookIntegrityMismatch)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookIntegrityMismatch) }
+    }
+    
+    var webhookIntegrityError: Bool {
+        get {
+            guard defaults.object(forKey: kWebhookIntegrityError) != nil else { return true }
+            return defaults.bool(forKey: kWebhookIntegrityError)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kWebhookIntegrityError) }
+    }
+    
+    var maxUploadSpeedMBps: Double {
+        get {
+            let value = defaults.double(forKey: kMaxUploadSpeedMBps)
+            return value == 0 ? 0 : value
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kMaxUploadSpeedMBps) }
+    }
+    
+    var pauseOnExpensiveNetwork: Bool {
+        get {
+            guard defaults.object(forKey: kPauseOnExpensiveNetwork) != nil else { return false }
+            return defaults.bool(forKey: kPauseOnExpensiveNetwork)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kPauseOnExpensiveNetwork) }
+    }
+    
+    var metricsServerEnabled: Bool {
+        get {
+            guard defaults.object(forKey: kMetricsServerEnabled) != nil else { return false }
+            return defaults.bool(forKey: kMetricsServerEnabled)
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kMetricsServerEnabled) }
+    }
+    
+    var metricsServerPort: Int {
+        get {
+            let port = defaults.integer(forKey: kMetricsServerPort)
+            return port == 0 ? 9099 : port
+        }
+        set { objectWillChange.send(); defaults.set(newValue, forKey: kMetricsServerPort) }
     }
     
     var s3Config: S3Config {

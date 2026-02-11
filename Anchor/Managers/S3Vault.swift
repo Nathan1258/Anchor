@@ -291,6 +291,10 @@ final class S3Vault: VaultProvider {
     }
     
     func saveFile(source: URL, relativePath: String, metadata: [String: String]? = nil, checkCancellation: (() -> Bool)? = nil) async throws {
+        if await shouldPauseForExpensiveNetwork() {
+            throw VaultError.networkUnavailable
+        }
+        
         let safeKey = safe(relativePath)
         let isDirectory = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         
@@ -298,6 +302,12 @@ final class S3Vault: VaultProvider {
             try await savePackage(source: source, relativePath: safeKey, metadata: metadata)
         } else {
             try await uploadSingleFile(source: source, key: safeKey, metadata: metadata, checkCancellation: checkCancellation)
+        }
+    }
+    
+    private func shouldPauseForExpensiveNetwork() async -> Bool {
+        return await MainActor.run {
+            PersistenceManager.shared.pauseOnExpensiveNetwork && NetworkMonitor.shared.isExpensive
         }
     }
     

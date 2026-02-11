@@ -715,8 +715,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                 return false
                             }
                             
-                            // Persist to ledger for auditing
-                            ledger.markAsProcessed(relativePath: relativePath, genID: asset.localIdentifier, contentHash: contentHash)
+                            await ledger.markAsProcessed(relativePath: finalRelativePath, genID: asset.localIdentifier, contentHash: contentHash)
                             
                             await collector.addSavedFile(filename)
                         }
@@ -878,7 +877,11 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     }
                     
                     // Persist to ledger for auditing
-                    ledger.markAsProcessed(relativePath: relativePath, genID: asset.localIdentifier, contentHash: contentHash)
+                    let pathToStore = finalRelativePath
+                    let hashToStore = contentHash
+                    await MainActor.run {
+                        ledger.markAsProcessed(relativePath: pathToStore, genID: asset.localIdentifier, contentHash: hashToStore)
+                    }
                     
                     savedFilenames.append(filename)
                 }

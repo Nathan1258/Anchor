@@ -9,10 +9,24 @@ import Foundation
 import Combine
 
 /// Webhook event types
-enum WebhookEventType: String, Codable {
+enum WebhookEventType: String, Codable, CaseIterable {
     case backupComplete = "backup_complete"
     case backupFailed = "backup_failed"
+    case vaultIssue = "vault_issue"
+    case integrityMismatch = "integrity_mismatch"
+    case integrityError = "integrity_error"
     case test = "test"
+    
+    var displayName: String {
+        switch self {
+        case .backupComplete: return "Backup Completed"
+        case .backupFailed: return "Backup Failed"
+        case .vaultIssue: return "Vault Issues"
+        case .integrityMismatch: return "Integrity Mismatch Detected"
+        case .integrityError: return "Integrity Verification Errors"
+        case .test: return "Test Webhook"
+        }
+    }
 }
 
 /// Backup type for webhook events
@@ -58,6 +72,10 @@ class WebhookManager: ObservableObject {
             return
         }
         
+        guard isEventEnabled(event) else {
+            return
+        }
+        
         let payload = WebhookPayload(
             event: event,
             backupType: backupType,
@@ -67,6 +85,24 @@ class WebhookManager: ObservableObject {
         
         Task {
             await sendWebhook(to: url, payload: payload)
+        }
+    }
+    
+    /// Check if a webhook event type is enabled
+    private func isEventEnabled(_ event: WebhookEventType) -> Bool {
+        switch event {
+        case .backupComplete:
+            return PersistenceManager.shared.webhookBackupComplete
+        case .backupFailed:
+            return PersistenceManager.shared.webhookBackupFailed
+        case .vaultIssue:
+            return PersistenceManager.shared.webhookVaultIssue
+        case .integrityMismatch:
+            return PersistenceManager.shared.webhookIntegrityMismatch
+        case .integrityError:
+            return PersistenceManager.shared.webhookIntegrityError
+        case .test:
+            return true
         }
     }
     

@@ -152,7 +152,6 @@ final class LocalVault: VaultProvider {
         
         try FileManager.default.copyItem(at: source, to: destURL)
         
-        // Apply metadata as extended attributes
         if let metadata = metadata {
             for (key, value) in metadata {
                 let xattrKey = "com.anchor.\(key)"
@@ -188,15 +187,19 @@ final class LocalVault: VaultProvider {
     }
     
     func getMetadata(for relativePath: String) async throws -> [String: String] {
-        let destURL = rootURL.appendingPathComponent(relativePath)
+        var destURL = rootURL.appendingPathComponent(relativePath)
         
-        guard FileManager.default.fileExists(atPath: destURL.path) else {
-            throw NSError(domain: "Anchor", code: 404, userInfo: [NSLocalizedDescriptionKey: "File not found"])
+        if !FileManager.default.fileExists(atPath: destURL.path) {
+            let encryptedURL = rootURL.appendingPathComponent(relativePath + ".anchor")
+            if FileManager.default.fileExists(atPath: encryptedURL.path) {
+                destURL = encryptedURL
+            } else {
+                throw NSError(domain: "Anchor", code: 404, userInfo: [NSLocalizedDescriptionKey: "File not found"])
+            }
         }
         
         var metadata: [String: String] = [:]
         
-        // Read the original-sha256 extended attribute
         let xattrKey = "com.anchor.original-sha256"
         let bufferSize = getxattr(destURL.path, xattrKey, nil, 0, 0, 0)
         

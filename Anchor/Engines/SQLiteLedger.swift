@@ -502,6 +502,7 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
                 SELECT path, content_hash FROM files 
                 WHERE content_hash IS NOT NULL 
                 AND (last_verified IS NULL OR last_verified < ?) 
+                ORDER BY last_verified ASC 
                 LIMIT ?;
             """
             
@@ -553,6 +554,24 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
             sqlite3_finalize(statement)
             
             return (verified, pending, errors, total)
+        }
+    }
+    
+    func getContentHash(for relativePath: String) -> String? {
+        return queue.sync {
+            let query = "SELECT content_hash FROM files WHERE path = ?;"
+            var statement: OpaquePointer?
+            defer { sqlite3_finalize(statement) }
+            
+            if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
+                sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                
+                if sqlite3_step(statement) == SQLITE_ROW,
+                   let hashC = sqlite3_column_text(statement, 0) {
+                    return String(cString: hashC)
+                }
+            }
+            return nil
         }
     }
 }

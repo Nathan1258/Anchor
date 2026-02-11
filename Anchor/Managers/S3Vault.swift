@@ -73,7 +73,7 @@ final class S3Vault: VaultProvider {
                        let key = upload.key,
                        let uploadId = upload.uploadId {
                         
-                        print("🧹 Aborting ghost upload: \(key)")
+                        print("Aborting ghost upload: \(key)")
                         let abortInput = AbortMultipartUploadInput(bucket: self.bucket, key: key, uploadId: uploadId)
                         _ = try await client.abortMultipartUpload(input: abortInput)
                         totalCleaned += 1
@@ -91,7 +91,7 @@ final class S3Vault: VaultProvider {
         } while keyMarker != nil || uploadIdMarker != nil
         
         if totalCleaned > 0 {
-            print("✅ Cleaned up \(totalCleaned) orphaned multipart uploads")
+            print("Cleaned up \(totalCleaned) orphaned multipart uploads")
         }
     }
     
@@ -374,7 +374,7 @@ final class S3Vault: VaultProvider {
             } catch {
                 let errorString = String(describing: error)
                 if errorString.contains("NoSuchUpload") {
-                    print("⚠️ Zombie Upload ID detected for \(safeKey). Forgetting and restarting...")
+                    print("Zombie Upload ID detected for \(safeKey). Forgetting and restarting...")
                     ledger.removeUploadID(relativePath: safeKey)
                     
                     let createInput = CreateMultipartUploadInput(bucket: bucket, key: safeKey)
@@ -527,7 +527,7 @@ final class S3Vault: VaultProvider {
                 uploadId: uploadId
             )
             _ = try await client.completeMultipartUpload(input: completeInput)
-            print("✅ Large file move complete.")
+            print("Large file move complete.")
             
         } catch {
             let abortInput = AbortMultipartUploadInput(bucket: self.bucket, key: destKey, uploadId: uploadId)
@@ -603,9 +603,22 @@ final class S3Vault: VaultProvider {
             let output = try await client.headObject(input: input)
             return output.metadata ?? [:]
         } catch {
-            // If file doesn't exist or error occurs, return empty metadata
-            print("S3 getMetadata error for \(safeKey): \(error)")
-            throw error
+            let errorString = String(describing: error)
+            if errorString.contains("NoSuchKey") || errorString.contains("NotFound") {
+                let encryptedKey = safe(relativePath + ".anchor")
+                let encryptedInput = HeadObjectInput(bucket: self.bucket, key: encryptedKey)
+                
+                do {
+                    let output = try await client.headObject(input: encryptedInput)
+                    return output.metadata ?? [:]
+                } catch {
+                    print("S3 getMetadata error for \(safeKey) and \(encryptedKey): \(error)")
+                    throw error
+                }
+            } else {
+                print("S3 getMetadata error for \(safeKey): \(error)")
+                throw error
+            }
         }
     }
 }

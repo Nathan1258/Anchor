@@ -26,7 +26,6 @@ class IntegrityManager: ObservableObject {
         updateStats()
     }
     
-    /// Updates the published statistics
     func updateStats() {
         let stats = ledger.getVerificationStats()
         
@@ -38,8 +37,12 @@ class IntegrityManager: ObservableObject {
         }
     }
     
-    /// Starts the background integrity verification process
     func startVerification() {
+        if PersistenceManager.shared.isGlobalPaused {
+            print("IntegrityManager: Global pause active. Skipping.")
+            return
+        }
+        
         guard !isRunning else { return }
         
         isRunning = true
@@ -55,7 +58,6 @@ class IntegrityManager: ObservableObject {
         }
     }
     
-    /// Stops the background integrity verification process
     func stopVerification() {
         isRunning = false
         verificationTask?.cancel()
@@ -68,42 +70,48 @@ class IntegrityManager: ObservableObject {
         print("IntegrityManager: Stopped verification")
     }
     
-    /// Main verification loop that runs continuously
     private func verificationLoop() async {
         while isRunning {
             do {
-                // Get vault providers
-                guard let driveProvider = try await VaultFactory.getProvider(type: PersistenceManager.shared.driveVaultType, bookmarkType: .driveVault) else {
-                    print("IntegrityManager: Drive vault not available, waiting...")
-                    try await Task.sleep(for: .seconds(300)) // Wait 5 minutes
+                let driveVaultType = PersistenceManager.shared.driveVaultType
+                let photoVaultType = PersistenceManager.shared.photoVaultType
+                let networkStatus = NetworkMonitor.shared.status
+                
+                if (driveVaultType == .s3 || photoVaultType == .s3) && networkStatus != .verified {
+                    print("IntegrityManager: Network offline, waiting for connection...")
+                    try await Task.sleep(for: .seconds(60))
                     continue
                 }
                 
-                let photoProvider = try? await VaultFactory.getProvider(type: PersistenceManager.shared.photoVaultType, bookmarkType: .photoVault)
+                let driveProvider = try? await VaultFactory.getProvider(type: driveVaultType, bookmarkType: .driveVault)
+                let photoProvider = try? await VaultFactory.getProvider(type: photoVaultType, bookmarkType: .photoVault)
                 
-                // Get batch of files to verify
+                if driveProvider == nil && photoProvider == nil {
+                    print("IntegrityManager: No vaults available, waiting...")
+                    try await Task.sleep(for: .seconds(300))
+                    continue
+                }
+                
                 let filesToVerify = ledger.getFilesForAuditing(limit: 50)
                 
                 if filesToVerify.isEmpty {
                     print("IntegrityManager: No files need verification, waiting...")
-                    try await Task.sleep(for: .seconds(3600)) // Wait 1 hour
+                    try await Task.sleep(for: .seconds(3600))
                     continue
                 }
                 
                 print("IntegrityManager: Verifying \(filesToVerify.count) files")
                 
-                // Verify each file
                 for (path, expectedHash) in filesToVerify {
                     guard isRunning else { break }
                     
-                    // Determine which provider to use based on path prefix
                     let provider: VaultProvider?
                     if path.hasPrefix("drive/") {
                         provider = driveProvider
                     } else if path.hasPrefix("photos/") {
                         provider = photoProvider
                     } else {
-                        provider = driveProvider // Default to drive
+                        provider = driveProvider
                     }
                     
                     guard let vaultProvider = provider else {
@@ -111,69 +119,104 @@ class IntegrityManager: ObservableObject {
                         continue
                     }
                     
-                    await verifyFile(path: path, expectedHash: expectedHash, provider: vaultProvider)
+                    _ = await verifyFile(path: path, expectedHash: expectedHash, provider: vaultProvider)
                     
-                    // Small delay between verifications to avoid overwhelming the system
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 
-                // Update stats after batch
                 await MainActor.run {
                     self.updateStats()
                 }
                 
-                // Wait before next batch
-                try await Task.sleep(for: .seconds(60)) // Wait 1 minute between batches
+                try await Task.sleep(for: .seconds(60))
                 
             } catch {
                 print("IntegrityManager: Error in verification loop: \(error)")
-                try? await Task.sleep(for: .seconds(300)) // Wait 5 minutes on error
+                try? await Task.sleep(for: .seconds(300))
             }
         }
     }
     
-    /// Verifies a single file's integrity
-    private func verifyFile(path: String, expectedHash: String, provider: VaultProvider) async {
+    private func verifyFile(path: String, expectedHash: String, provider: VaultProvider) async -> Bool {
         do {
             let metadata = try await provider.getMetadata(for: path)
             
             guard let remoteHash = metadata["original-sha256"] else {
-                // Metadata missing - file might be old or metadata not stored
                 print("IntegrityManager: ⚠️ Metadata missing for \(path)")
-                ledger.updateVerificationStatus(path: path, status: 3, date: Date()) // Missing
-                return
+                
+                if provider is LocalVault {
+                    print("IntegrityManager: 🔧 Attempting self-heal for local file \(path)")
+                    
+                    do {
+                        let vaultURL: URL?
+                        if path.hasPrefix("drive/") {
+                            vaultURL = PersistenceManager.shared.loadBookmark(type: .driveVault)
+                        } else if path.hasPrefix("photos/") {
+                            vaultURL = PersistenceManager.shared.loadBookmark(type: .photoVault)
+                        } else {
+                            vaultURL = PersistenceManager.shared.loadBookmark(type: .driveVault)
+                        }
+                        
+                        guard let vault = vaultURL else {
+                            print("IntegrityManager: Cannot self-heal - vault URL not available")
+                            return false
+                        }
+                        
+                        let fileURL = vault.appendingPathComponent(path)
+                        let calculatedHash = try CryptoManager.shared.calculateSHA256(for: fileURL)
+                        
+                        if calculatedHash == expectedHash {
+                            print("IntegrityManager: ✅ Self-heal successful - file is intact, writing metadata")
+                            
+                            let xattrKey = "com.anchor.original-sha256"
+                            setxattr(fileURL.path, xattrKey, calculatedHash, calculatedHash.utf8.count, 0, 0)
+                            
+                            ledger.updateVerificationStatus(path: path, status: 1, date: Date())
+                            return true
+                        } else {
+                            print("IntegrityManager: ❌ Self-heal failed - hash mismatch")
+                            print("  Expected: \(expectedHash)")
+                            print("  Actual:   \(calculatedHash)")
+                            ledger.updateVerificationStatus(path: path, status: 2, date: Date())
+                            return false
+                        }
+                    } catch {
+                        print("IntegrityManager: Self-heal error: \(error)")
+                        ledger.updateVerificationStatus(path: path, status: 3, date: Date())
+                        return false
+                    }
+                } else {
+                    ledger.updateVerificationStatus(path: path, status: 3, date: Date())
+                    return false
+                }
             }
             
             if remoteHash == expectedHash {
-                // Hashes match - verified!
                 print("IntegrityManager: ✅ Verified \(path)")
-                ledger.updateVerificationStatus(path: path, status: 1, date: Date()) // Verified
+                ledger.updateVerificationStatus(path: path, status: 1, date: Date())
+                return true
             } else {
-                // Hashes don't match - mismatch detected!
-                print("IntegrityManager: ❌ MISMATCH detected for \(path)")
+                print("IntegrityManager: MISMATCH detected for \(path)")
                 print("  Expected: \(expectedHash)")
                 print("  Remote:   \(remoteHash)")
-                ledger.updateVerificationStatus(path: path, status: 2, date: Date()) // Mismatch
+                ledger.updateVerificationStatus(path: path, status: 2, date: Date())
                 
-                // Send notification for critical integrity issue
                 NotificationManager.shared.send(
                     title: "Integrity Mismatch Detected",
                     body: "File '\(path)' has a hash mismatch. Backup may be corrupted.",
                     type: .vaultIssue
                 )
+                return false
             }
             
         } catch {
             print("IntegrityManager: Error verifying \(path): \(error)")
-            // Don't update status on error - will retry later
+            return false
         }
     }
     
-    /// Performs a one-time verification of a specific file
     func verifySingleFile(path: String, provider: VaultProvider) async -> Bool {
-        // Get expected hash from ledger
-        // Note: This would require adding a method to SQLiteLedger to fetch a single file's hash
-        // For now, this is a placeholder for future expansion
-        return false
+        guard let hash = ledger.getContentHash(for: path) else { return false }
+        return await verifyFile(path: path, expectedHash: hash, provider: provider)
     }
 }

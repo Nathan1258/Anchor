@@ -13,6 +13,7 @@ struct DashboardView: View {
     
     @ObservedObject var persistence = PersistenceManager.shared
     @ObservedObject var network = NetworkMonitor.shared
+    @ObservedObject var integrityManager = IntegrityManager.shared
     
     @Environment(\.openWindow) var openWindow
     @Namespace private var glassNamespace
@@ -202,6 +203,24 @@ struct DashboardView: View {
                         )
                         .glassEffect(in: .rect(cornerRadius: 16))
                     }
+                    .padding(.horizontal, 20)
+                }
+                
+                GlassEffectContainer(spacing: 16) {
+                    IntegrityStatusCard(
+                        filesVerified: integrityManager.filesVerified,
+                        filesPending: integrityManager.filesPending,
+                        filesWithErrors: integrityManager.filesWithErrors,
+                        totalFiles: integrityManager.totalFiles,
+                        isVerifying: integrityManager.isVerifying,
+                        onVerifyNow: {
+                            integrityManager.updateStats()
+                            if !integrityManager.isVerifying {
+                                integrityManager.startVerification()
+                            }
+                        }
+                    )
+                    .glassEffect(in: .rect(cornerRadius: 16))
                     .padding(.horizontal, 20)
                 }
                 
@@ -432,5 +451,138 @@ struct StatusBanner: View {
             .glassEffect(.regular.tint(color))
         }
         .padding(.horizontal, 20)
+    }
+}
+
+struct IntegrityStatusCard: View {
+    let filesVerified: Int
+    let filesPending: Int
+    let filesWithErrors: Int
+    let totalFiles: Int
+    let isVerifying: Bool
+    let onVerifyNow: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Image(systemName: "checkmark.shield.fill")
+                    .font(.title2)
+                    .foregroundStyle(integrityColor)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Backup Integrity")
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                    
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(action: onVerifyNow) {
+                    HStack(spacing: 4) {
+                        if isVerifying {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(isVerifying ? "Verifying..." : "Verify Now")
+                    }
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .disabled(isVerifying)
+            }
+            
+            Divider()
+            
+            HStack(spacing: 16) {
+                StatColumn(
+                    value: "\(filesVerified)",
+                    label: "Verified",
+                    color: .green,
+                    icon: "checkmark.circle.fill"
+                )
+                
+                StatColumn(
+                    value: "\(filesPending)",
+                    label: "Pending",
+                    color: .orange,
+                    icon: "clock.fill"
+                )
+                
+                StatColumn(
+                    value: "\(filesWithErrors)",
+                    label: "Errors",
+                    color: filesWithErrors > 0 ? .red : .secondary,
+                    icon: "exclamationmark.triangle.fill"
+                )
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("\(totalFiles)")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.primary)
+                    Text("Total Files")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(16)
+    }
+    
+    var integrityColor: Color {
+        if filesWithErrors > 0 {
+            return .red
+        } else if filesPending > filesVerified {
+            return .orange
+        } else {
+            return .green
+        }
+    }
+    
+    var statusText: String {
+        if isVerifying {
+            return "Verification in progress..."
+        } else if filesWithErrors > 0 {
+            return "Issues detected - review required"
+        } else if filesPending > 0 {
+            return "\(filesPending) files awaiting verification"
+        } else if totalFiles > 0 {
+            return "All files verified"
+        } else {
+            return "No files to verify"
+        }
+    }
+}
+
+struct StatColumn: View {
+    let value: String
+    let label: String
+    let color: Color
+    let icon: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(color)
+                Text(value)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.primary)
+            }
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
     }
 }

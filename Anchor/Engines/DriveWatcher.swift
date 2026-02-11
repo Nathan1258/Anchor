@@ -1086,12 +1086,13 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                     let preparation = try CryptoManager.shared.prepareFileForUpload(source: snapshotFile)
                     uploadSource = preparation.url
                     wasEncrypted = preparation.isEncrypted
+                    let contentHash = preparation.contentHash
                     
                     if wasEncrypted {
                         uploadPath += ".anchor"
                     }
                     
-                    try await provider.saveFile(source: uploadSource, relativePath: uploadPath){ [weak self] in
+                    try await provider.saveFile(source: uploadSource, relativePath: uploadPath, metadata: ["original-sha256": contentHash]){ [weak self] in
                         guard let self = self else { return true }
                         
                         if !self.isRunning { return true }
@@ -1103,7 +1104,7 @@ class DriveWatcher: NSObject, ObservableObject, NSFilePresenter {
                         return false
                     }
                     
-                    self.ledger.markAsProcessed(relativePath: relativePath, genID: genID)
+                    self.ledger.markAsProcessed(relativePath: relativePath, genID: genID, contentHash: contentHash)
                     
                     await MainActor.run {
                         self.sessionVaultedCount += 1

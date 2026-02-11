@@ -8,7 +8,7 @@ import Foundation
 
 protocol VaultProvider: Sendable {
     /// Saves a file to the vault.
-    func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)?) async throws
+    func saveFile(source: URL, relativePath: String, metadata: [String: String]?, checkCancellation: (() -> Bool)?) async throws
     
     /// Lists all objects (or files if local)
     func listAllFiles() async throws -> [String]
@@ -41,6 +41,9 @@ protocol VaultProvider: Sendable {
     
     /// Deletes all files/photos
     func wipe(prefix: String) async throws
+    
+    /// Retrieves metadata for a specific file without downloading it
+    func getMetadata(for relativePath: String) async throws -> [String: String]
 }
 
 class VaultFactory {

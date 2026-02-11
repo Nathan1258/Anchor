@@ -127,7 +127,7 @@ final class LocalVault: VaultProvider {
         print("Local Wipe Complete: \(targetURL.lastPathComponent)")
     }
     
-    func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)? = nil) async throws {
+    func saveFile(source: URL, relativePath: String, metadata: [String: String]? = nil, checkCancellation: (() -> Bool)? = nil) async throws {
         if let checkCancellation, checkCancellation(){
             throw NSError(domain: "Anchor", code: 999, userInfo: [NSLocalizedDescriptionKey: "Copy Cancelled"])
         }
@@ -151,6 +151,15 @@ final class LocalVault: VaultProvider {
         }
         
         try FileManager.default.copyItem(at: source, to: destURL)
+        
+        // Apply metadata as extended attributes
+        if let metadata = metadata {
+            for (key, value) in metadata {
+                let xattrKey = "com.anchor.\(key)"
+                setxattr(destURL.path, xattrKey, value, value.utf8.count, 0, 0)
+            }
+        }
+        
         print("Local Copy Success: \(relativePath)")
     }
     
@@ -176,5 +185,32 @@ final class LocalVault: VaultProvider {
     func fileExists(relativePath: String) async -> Bool {
         let destURL = rootURL.appendingPathComponent(relativePath)
         return FileManager.default.fileExists(atPath: destURL.path)
+    }
+    
+    func getMetadata(for relativePath: String) async throws -> [String: String] {
+        let destURL = rootURL.appendingPathComponent(relativePath)
+        
+        guard FileManager.default.fileExists(atPath: destURL.path) else {
+            throw NSError(domain: "Anchor", code: 404, userInfo: [NSLocalizedDescriptionKey: "File not found"])
+        }
+        
+        var metadata: [String: String] = [:]
+        
+        // Read the original-sha256 extended attribute
+        let xattrKey = "com.anchor.original-sha256"
+        let bufferSize = getxattr(destURL.path, xattrKey, nil, 0, 0, 0)
+        
+        if bufferSize > 0 {
+            var buffer = [UInt8](repeating: 0, count: bufferSize)
+            let result = getxattr(destURL.path, xattrKey, &buffer, bufferSize, 0, 0)
+            
+            if result > 0 {
+                if let value = String(bytes: buffer.prefix(result), encoding: .utf8) {
+                    metadata["original-sha256"] = value
+                }
+            }
+        }
+        
+        return metadata
     }
 }

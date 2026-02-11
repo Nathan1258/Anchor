@@ -290,18 +290,18 @@ final class S3Vault: VaultProvider {
         print("Photo token saved to S3")
     }
     
-    func saveFile(source: URL, relativePath: String, checkCancellation: (() -> Bool)? = nil) async throws {
+    func saveFile(source: URL, relativePath: String, metadata: [String: String]? = nil, checkCancellation: (() -> Bool)? = nil) async throws {
         let safeKey = safe(relativePath)
         let isDirectory = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         
         if isDirectory {
-            try await savePackage(source: source, relativePath: safeKey)
+            try await savePackage(source: source, relativePath: safeKey, metadata: metadata)
         } else {
-            try await uploadSingleFile(source: source, key: safeKey, checkCancellation: checkCancellation)
+            try await uploadSingleFile(source: source, key: safeKey, metadata: metadata, checkCancellation: checkCancellation)
         }
     }
     
-    private func savePackage(source: URL, relativePath: String) async throws {
+    private func savePackage(source: URL, relativePath: String, metadata: [String: String]? = nil) async throws {
         let zipName = source.lastPathComponent + ".zip"
         let tempDir = FileManager.default.temporaryDirectory
         let tempZipURL = tempDir.appendingPathComponent(UUID().uuidString).appendingPathComponent(zipName)
@@ -325,7 +325,7 @@ final class S3Vault: VaultProvider {
         print("Zipped Package: \(source.lastPathComponent) -> \(uploadKey)")
         
         do {
-            try await uploadSingleFile(source: tempZipURL, key: uploadKey)
+            try await uploadSingleFile(source: tempZipURL, key: uploadKey, metadata: metadata)
             try FileManager.default.removeItem(at: tempZipURL)
         } catch {
             try? FileManager.default.removeItem(at: tempZipURL)
@@ -333,13 +333,13 @@ final class S3Vault: VaultProvider {
         }
     }
     
-    func uploadSingleFile(source: URL, key: String, checkCancellation: (() -> Bool)? = nil) async throws {
+    func uploadSingleFile(source: URL, key: String, metadata: [String: String]? = nil, checkCancellation: (() -> Bool)? = nil) async throws {
         let safeKey = safe(key)
         let fileSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)) ?? 0
         let MIN_PART_SIZE: Int64 = 5 * 1024 * 1024
         
         if fileSize < PART_SIZE {
-            try await simpleUpload(source: source, relativePath: safeKey)
+            try await simpleUpload(source: source, relativePath: safeKey, metadata: metadata)
             return
         }
         
@@ -350,7 +350,7 @@ final class S3Vault: VaultProvider {
         var uploadID = ledger.getActiveUploadID(relativePath: safeKey)
         
         if uploadID == nil {
-            let createInput = CreateMultipartUploadInput(bucket: bucket, key: safeKey)
+            let createInput = CreateMultipartUploadInput(bucket: bucket, key: safeKey, metadata: metadata)
             let response = try await client.createMultipartUpload(input: createInput)
             uploadID = response.uploadId
             if let id = uploadID {
@@ -536,9 +536,9 @@ final class S3Vault: VaultProvider {
         }
     }
     
-    private func simpleUpload(source: URL, relativePath: String) async throws {
+    private func simpleUpload(source: URL, relativePath: String, metadata: [String: String]? = nil) async throws {
         let data = try Data(contentsOf: source) 
-        let input = PutObjectInput(body: .data(data), bucket: bucket, key: relativePath)
+        let input = PutObjectInput(body: .data(data), bucket: bucket, key: relativePath, metadata: metadata)
         _ = try await client.putObject(input: input)
         print("Simple Upload Success: \(relativePath)")
     }
@@ -593,5 +593,19 @@ final class S3Vault: VaultProvider {
         _ = try await client.deleteObject(input: deleteInput)
         
         print("Connection Test Passed")
+    }
+    
+    func getMetadata(for relativePath: String) async throws -> [String: String] {
+        let safeKey = safe(relativePath)
+        let input = HeadObjectInput(bucket: self.bucket, key: safeKey)
+        
+        do {
+            let output = try await client.headObject(input: input)
+            return output.metadata ?? [:]
+        } catch {
+            // If file doesn't exist or error occurs, return empty metadata
+            print("S3 getMetadata error for \(safeKey): \(error)")
+            throw error
+        }
     }
 }

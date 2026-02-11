@@ -99,7 +99,7 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
     }
         
     private func createTable() {
-        _ = execute(sql: "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT, failure_count INTEGER DEFAULT 0);")
+        _ = execute(sql: "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, gen_id TEXT, failure_count INTEGER DEFAULT 0, content_hash TEXT, last_verified DOUBLE, verification_status INTEGER DEFAULT 0);")
         _ = execute(sql: "CREATE TABLE IF NOT EXISTS uploads (path TEXT PRIMARY KEY, upload_id TEXT, timestamp DOUBLE);")
     }
     
@@ -343,14 +343,20 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
         }
     }
     
-    func markAsProcessed(relativePath: String, genID: String) {
+    func markAsProcessed(relativePath: String, genID: String, contentHash: String? = nil) {
         queue.async(flags: .barrier) {
-            let query = "INSERT OR REPLACE INTO files (path, gen_id, failure_count) VALUES (?, ?, 0);"
+            let query = "INSERT OR REPLACE INTO files (path, gen_id, failure_count, content_hash, verification_status) VALUES (?, ?, 0, ?, 0);"
             var statement: OpaquePointer?
             
             if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
                 sqlite3_bind_text(statement, 1, (relativePath as NSString).utf8String, -1, SQLITE_TRANSIENT)
                 sqlite3_bind_text(statement, 2, (genID as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                
+                if let hash = contentHash {
+                    sqlite3_bind_text(statement, 3, (hash as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                } else {
+                    sqlite3_bind_null(statement, 3)
+                }
                 
                 if sqlite3_step(statement) != SQLITE_DONE {
                     self.logError("Write Error (markAsProcessed)")
@@ -464,6 +470,89 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
             print("SQLite \(context): \(message)")
         } else {
             print("SQLite \(context): Unknown error")
+        }
+    }
+    
+    func updateVerificationStatus(path: String, status: Int, date: Date) {
+        queue.async(flags: .barrier) {
+            let query = "UPDATE files SET verification_status = ?, last_verified = ? WHERE path = ?;"
+            var statement: OpaquePointer?
+            
+            if sqlite3_prepare_v2(self.db, query, -1, &statement, nil) == SQLITE_OK {
+                sqlite3_bind_int(statement, 1, Int32(status))
+                sqlite3_bind_double(statement, 2, date.timeIntervalSince1970)
+                sqlite3_bind_text(statement, 3, (path as NSString).utf8String, -1, SQLITE_TRANSIENT)
+                
+                if sqlite3_step(statement) != SQLITE_DONE {
+                    self.logError("Write Error (updateVerificationStatus)")
+                }
+            } else {
+                self.logError("Prepare Error (updateVerificationStatus)")
+            }
+            sqlite3_finalize(statement)
+        }
+    }
+    
+    func getFilesForAuditing(limit: Int) -> [(path: String, hash: String)] {
+        return queue.sync {
+            var files: [(path: String, hash: String)] = []
+            let sevenDaysAgo = Date().addingTimeInterval(-7 * 24 * 60 * 60).timeIntervalSince1970
+            
+            let query = """
+                SELECT path, content_hash FROM files 
+                WHERE content_hash IS NOT NULL 
+                AND (last_verified IS NULL OR last_verified < ?) 
+                LIMIT ?;
+            """
+            
+            var statement: OpaquePointer?
+            
+            if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
+                sqlite3_bind_double(statement, 1, sevenDaysAgo)
+                sqlite3_bind_int(statement, 2, Int32(limit))
+                
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    if let pathC = sqlite3_column_text(statement, 0),
+                       let hashC = sqlite3_column_text(statement, 1) {
+                        files.append((path: String(cString: pathC), hash: String(cString: hashC)))
+                    }
+                }
+            }
+            sqlite3_finalize(statement)
+            return files
+        }
+    }
+    
+    func getVerificationStats() -> (verified: Int, pending: Int, errors: Int, total: Int) {
+        return queue.sync {
+            var verified = 0
+            var pending = 0
+            var errors = 0
+            var total = 0
+            
+            let query = """
+                SELECT 
+                    COUNT(CASE WHEN verification_status = 1 THEN 1 END) as verified,
+                    COUNT(CASE WHEN verification_status = 0 THEN 1 END) as pending,
+                    COUNT(CASE WHEN verification_status IN (2, 3) THEN 1 END) as errors,
+                    COUNT(*) as total
+                FROM files 
+                WHERE content_hash IS NOT NULL;
+            """
+            
+            var statement: OpaquePointer?
+            
+            if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK {
+                if sqlite3_step(statement) == SQLITE_ROW {
+                    verified = Int(sqlite3_column_int(statement, 0))
+                    pending = Int(sqlite3_column_int(statement, 1))
+                    errors = Int(sqlite3_column_int(statement, 2))
+                    total = Int(sqlite3_column_int(statement, 3))
+                }
+            }
+            sqlite3_finalize(statement)
+            
+            return (verified, pending, errors, total)
         }
     }
 }

@@ -75,7 +75,7 @@ class CryptoManager {
     }
 
     
-    func encryptFile(source: URL) throws -> URL {
+    func encryptFile(source: URL) throws -> (url: URL, contentHash: String) {
         guard let key = symmetricKey else { throw CryptoError.noKeyConfigured }
         
         let sourceSize = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
@@ -95,6 +95,8 @@ class CryptoManager {
         let reader = try FileHandle(forReadingFrom: source)
         let writer = try FileHandle(forWritingTo: destURL)
         
+        var hasher = SHA256()
+        
         defer {
             try? reader.close()
             try? writer.close()
@@ -104,6 +106,10 @@ class CryptoManager {
             autoreleasepool {
                 let rawData = (try? reader.read(upToCount: rawChunkSize)) ?? Data()
                 if rawData.isEmpty { return }
+                
+                // Hash the plaintext data before encrypting
+                hasher.update(data: rawData)
+                
                 let nonce = AES.GCM.Nonce()
                 
                 do {
@@ -122,7 +128,10 @@ class CryptoManager {
             }
         }
         
-        return destURL
+        let digest = hasher.finalize()
+        let hashString = digest.map { String(format: "%02x", $0) }.joined()
+        
+        return (destURL, hashString)
     }
     
     func decryptFile(source: URL, dest: URL) throws {
@@ -210,13 +219,44 @@ class CryptoManager {
         return SymmetricKey(data: derivedKeyData)
     }
     
-    func prepareFileForUpload(source: URL) throws -> (url: URL, isEncrypted: Bool) {
+    /// Calculates SHA-256 hash of a file by streaming it in chunks
+    func calculateSHA256(for fileURL: URL) throws -> String {
+        let reader = try FileHandle(forReadingFrom: fileURL)
+        var hasher = SHA256()
+        
+        defer {
+            try? reader.close()
+        }
+        
+        while true {
+            autoreleasepool {
+                let chunk = (try? reader.read(upToCount: rawChunkSize)) ?? Data()
+                if chunk.isEmpty { return }
+                hasher.update(data: chunk)
+            }
+            
+            if (try? reader.offset()) ?? 0 >= (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0 {
+                break
+            }
+        }
+        
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+    
+    func prepareFileForUpload(source: URL) throws -> (url: URL, isEncrypted: Bool, contentHash: String) {
         if isConfigured {
-            if source.pathExtension == "anchor" { return (source, true) }
-            let encryptedURL = try encryptFile(source: source)
-            return (encryptedURL, true)
+            if source.pathExtension == "anchor" {
+                // Already encrypted file - calculate hash of the original (not ideal, but fallback)
+                let hash = try calculateSHA256(for: source)
+                return (source, true, hash)
+            }
+            let (encryptedURL, hash) = try encryptFile(source: source)
+            return (encryptedURL, true, hash)
         } else {
-            return (source, false)
+            // No encryption - still calculate hash
+            let hash = try calculateSHA256(for: source)
+            return (source, false, hash)
         }
     }
     

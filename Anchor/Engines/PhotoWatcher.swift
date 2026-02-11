@@ -25,6 +25,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     
     private var vaultProvider: VaultProvider?
     private var vaultMonitor: VaultMonitor?
+    private let ledger = SQLiteLedger.shared
     private let energyManager = EnergyManager.shared
     private let webhookManager = WebhookManager.shared
     
@@ -673,6 +674,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                     var wasEncrypted = false
                     
                     let energyManager = self.energyManager
+                    let ledger = self.ledger
                     defer {
                         Task {
                             await TransferQueue.shared.taskFinished()
@@ -686,6 +688,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         let preparation = try await CryptoManager.shared.prepareFileForUpload(source: tempFileURL)
                         finalSource = preparation.url
                         wasEncrypted = preparation.isEncrypted
+                        let contentHash = preparation.contentHash
                         
                         if wasEncrypted {
                             finalRelativePath += ".anchor"
@@ -694,7 +697,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         let exists = await provider.fileExists(relativePath: finalRelativePath)
                         
                         if !exists {
-                            try await provider.saveFile(source: finalSource, relativePath: finalRelativePath){ [weak self] in
+                            try await provider.saveFile(source: finalSource, relativePath: finalRelativePath, metadata: ["original-sha256": contentHash]){ [weak self] in
                                 guard let self = self else { return true }
                                 
                                 if !self.isRunning { return true }
@@ -711,6 +714,10 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                                 
                                 return false
                             }
+                            
+                            // Persist to ledger for auditing
+                            ledger.markAsProcessed(relativePath: relativePath, genID: asset.localIdentifier, contentHash: contentHash)
+                            
                             await collector.addSavedFile(filename)
                         }
                         
@@ -780,8 +787,9 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     private func exportAssetAsync(_ asset: PHAsset, forceOverwrite: Bool = false) async {
         guard let provider = vaultProvider else { return }
         
-        await MainActor.run {
+        let ledger = await MainActor.run {
             self.lastPhotoProcessed = "Processing..."
+            return self.ledger
         }
         
         let date = asset.creationDate ?? Date()
@@ -848,6 +856,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let preparation = try CryptoManager.shared.prepareFileForUpload(source: tempFileURL)
                 finalSource = preparation.url
                 wasEncrypted = preparation.isEncrypted
+                let contentHash = preparation.contentHash
                 
                 if wasEncrypted {
                     finalRelativePath += ".anchor"
@@ -856,7 +865,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                 let exists = await provider.fileExists(relativePath: finalRelativePath)
                 
                 if !exists {
-                    try await provider.saveFile(source: finalSource, relativePath: finalRelativePath) { [weak self] in
+                    try await provider.saveFile(source: finalSource, relativePath: finalRelativePath, metadata: ["original-sha256": contentHash]) { [weak self] in
                         guard let self = self else { return true }
                         
                         if !self.isRunning { return true }
@@ -867,6 +876,10 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
                         
                         return false
                     }
+                    
+                    // Persist to ledger for auditing
+                    ledger.markAsProcessed(relativePath: relativePath, genID: asset.localIdentifier, contentHash: contentHash)
+                    
                     savedFilenames.append(filename)
                 }
                 

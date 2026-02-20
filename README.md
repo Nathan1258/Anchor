@@ -1,5 +1,5 @@
 # Anchor
-![Logo](https://is5-ssl.mzstatic.com/image/thumb/Purple123/v4/22/05/fd/2205fd56-f4fd-9ceb-4280-e5eb798cf9d0/AppIcon-85-220-0-4-2x.png/240x0w.webp)
+![Logo](https://is1-ssl.mzstatic.com/image/thumb/PurpleSource221/v4/a9/b8/3d/a9b83db9-fee1-7e57-2dec-79041bd2926a/Placeholder.mill/400x400bb-75.webp)
 
 **Anchor** is a powerful, lightweight open-source backup utility for macOS that provides a "Safety Net" for your iCloud Drive and Photo Library. It monitors your files in real-time and securely vaults them to a local drive or S3-compatible cloud storage.
 

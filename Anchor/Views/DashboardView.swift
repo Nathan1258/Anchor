@@ -92,7 +92,7 @@ struct DashboardView: View {
                     }
                     
                     if persistence.isGlobalPaused {
-                        GlassEffectContainer(spacing: 12) {
+                        CustomGlassContainer(spacing: 12) {
                             HStack(spacing: 12) {
                                 Image(systemName: "pause.circle.fill")
                                     .font(.title2)
@@ -119,17 +119,17 @@ struct DashboardView: View {
                                     driveWatcher.startWatching()
                                     photosWatcher.startWatching()
                                 }
-                                .buttonStyle(.glassProminent)
+                                .buttonStyle(.customGlassProminent)
                                 .controlSize(.small)
                             }
                             .padding(16)
-                            .glassEffect(.regular.tint(.orange))
+                            .customGlassEffect(cornerRadius: 12, tint: .orange)
                         }
                         .padding(.horizontal, 20)
                     }
                 }
                 
-                GlassEffectContainer(spacing: 16) {
+                CustomGlassContainer(spacing: 16) {
                     HStack(spacing: 16) {
                         EngineStatusColumn(
                             title: "iCloud Drive",
@@ -150,7 +150,7 @@ struct DashboardView: View {
                             },
                             onRestore: { openWindow(id: "restore") }
                         )
-                        .glassEffect(in: .rect(cornerRadius: 16))
+                        .customGlassEffect(cornerRadius: 16)
                         
                         EngineStatusColumn(
                             title: "Photo Library",
@@ -171,12 +171,12 @@ struct DashboardView: View {
                             },
                             onRestore: nil
                         )
-                        .glassEffect(in: .rect(cornerRadius: 16))
+                        .customGlassEffect(cornerRadius: 16)
                     }
                     .padding(.horizontal, 20)
                 }
                 
-                GlassEffectContainer(spacing: 16) {
+                CustomGlassContainer(spacing: 16) {
                     IntegrityStatusCard(
                         filesVerified: integrityManager.filesVerified,
                         filesPending: integrityManager.filesPending,
@@ -187,11 +187,11 @@ struct DashboardView: View {
                             integrityManager.verifyNow()
                         }
                     )
-                    .glassEffect(in: .rect(cornerRadius: 16))
+                    .customGlassEffect(cornerRadius: 16)
                     .padding(.horizontal, 20)
                 }
                 
-                GlassEffectContainer(spacing: 12) {
+                CustomGlassContainer(spacing: 12) {
                     HStack(spacing: 8) {
                         Image(systemName: "circle.fill")
                             .font(.system(size: 6))
@@ -205,7 +205,7 @@ struct DashboardView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .glassEffect()
+                    .customGlassEffect()
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 16)
@@ -312,11 +312,11 @@ struct EngineStatusColumn: View {
             VStack(spacing: 6) {
                 if !isConfigured {
                     Button("Configure in Settings") { onConfigure() }
-                        .buttonStyle(.glass)
+                        .buttonStyle(.customGlass)
                         .controlSize(.small)
                 } else if !isRunning {
                     Button("Start Monitor") { onStart() }
-                        .buttonStyle(.glassProminent)
+                        .buttonStyle(.customGlassProminent)
                         .controlSize(.small)
                 } else {
                     HStack(spacing: 4) {
@@ -334,7 +334,7 @@ struct EngineStatusColumn: View {
                         Label("Browse & Restore", systemImage: "clock.arrow.circlepath")
                             .font(.caption)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.customGlass)
                     .controlSize(.mini)
                 }
             }
@@ -378,7 +378,7 @@ struct StatusBanner: View {
     let icon: String
     
     var body: some View {
-        GlassEffectContainer(spacing: 12) {
+        CustomGlassContainer(spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 ZStack {
                     Circle()
@@ -403,7 +403,7 @@ struct StatusBanner: View {
                 Spacer()
             }
             .padding(16)
-            .glassEffect(.regular.tint(color))
+            .customGlassEffect(cornerRadius: 12, tint: color)
         }
         .padding(.horizontal, 20)
     }
@@ -448,7 +448,7 @@ struct IntegrityStatusCard: View {
                         Text(isVerifying ? "Verifying..." : "Verify Now")
                     }
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.customGlass)
                 .controlSize(.small)
                 .disabled(isVerifying)
             }

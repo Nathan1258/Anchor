@@ -7,6 +7,10 @@
 
 import SwiftUI
 
+extension Notification.Name {
+    static let openDashboard = Notification.Name("openDashboard")
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowObservers: [NSObjectProtocol] = []
     
@@ -24,6 +28,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 MetricsServer.shared.start()
             }
         }
+    }
+    
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            NotificationCenter.default.post(name: .openDashboard, object: nil)
+        }
+        return true
     }
     
     func setWatchers(drive: DriveWatcher, photo: PhotoWatcher) {
@@ -386,6 +397,9 @@ struct Main: View {
         .frame(width: 300)
         .onAppear {
             VaultStatusChecker.checkOnStartup(driveWatcher: driveWatcher, photoWatcher: photosWatcher)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openDashboard)) { _ in
+            openOrFocusWindow(id: "dashboard", title: "Dashboard")
         }
     }
     

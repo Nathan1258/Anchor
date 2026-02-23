@@ -60,6 +60,8 @@ class PersistenceManager: ObservableObject {
     private let kMetricsServerEnabled = "anchor_metrics_server_enabled"
     private let kMetricsServerPort = "anchor_metrics_server_port"
     
+    private let kPhotosBackupOriginalOnly = "anchor_photos_backup_original_only"
+    
     
     var backupMode: BackupMode {
         get {
@@ -332,6 +334,17 @@ class PersistenceManager: ObservableObject {
         set {
             objectWillChange.send()
             defaults.set(newValue.rawValue, forKey: kPhotosScheduleInterval)
+        }
+    }
+    
+    var photosBackupOriginalOnly: Bool {
+        get {
+            guard defaults.object(forKey: kPhotosBackupOriginalOnly) != nil else { return false }
+            return defaults.bool(forKey: kPhotosBackupOriginalOnly)
+        }
+        set {
+            objectWillChange.send()
+            defaults.set(newValue, forKey: kPhotosBackupOriginalOnly)
         }
     }
     

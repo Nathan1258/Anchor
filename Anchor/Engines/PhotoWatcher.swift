@@ -603,7 +603,19 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let year = String(calendar.component(.year, from: date))
         let month = String(format: "%02d", calendar.component(.month, from: date))
         
-        let resources = PHAssetResource.assetResources(for: asset)
+        let allResources = PHAssetResource.assetResources(for: asset)
+        
+        let resources: [PHAssetResource]
+        if PersistenceManager.shared.photosBackupOriginalOnly {
+            resources = Array(allResources).filter { resource in
+                let isAdjustmentData = resource.type == .adjustmentData
+                let isEditedPhoto = resource.type == .fullSizePhoto
+                let isEditedVideo = resource.type == .fullSizeVideo
+                return !isAdjustmentData && !isEditedPhoto && !isEditedVideo
+            }
+        } else {
+            resources = Array(allResources)
+        }
         
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -796,7 +808,23 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
         let year = String(calendar.component(.year, from: date))
         let month = String(format: "%02d", calendar.component(.month, from: date))
         
-        let resources = PHAssetResource.assetResources(for: asset)
+        let allResources = PHAssetResource.assetResources(for: asset)
+        
+        let resources: [PHAssetResource]
+        let backupOriginalOnly = await MainActor.run {
+            PersistenceManager.shared.photosBackupOriginalOnly
+        }
+        
+        if backupOriginalOnly {
+            resources = Array(allResources).filter { resource in
+                let isAdjustmentData = resource.type == .adjustmentData
+                let isEditedPhoto = resource.type == .fullSizePhoto
+                let isEditedVideo = resource.type == .fullSizeVideo
+                return !isAdjustmentData && !isEditedPhoto && !isEditedVideo
+            }
+        } else {
+            resources = Array(allResources)
+        }
         
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)

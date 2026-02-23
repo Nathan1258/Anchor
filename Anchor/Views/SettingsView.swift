@@ -862,6 +862,16 @@ struct SettingsView: View {
                     }
                 }
                 
+                Section(
+                    header: Text("Backup Options"),
+                    footer: Text("When enabled, only original unedited photos will be backed up. Edited versions and adjustment data will be skipped. Live Photos will still include both the image and video components.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                ) {
+                    Toggle("Backup Original Photos Only", isOn: $persistence.photosBackupOriginalOnly)
+                        .toggleStyle(.switch)
+                }
+                
                 photosScheduleSection
         }
         .tabItem { Label("Photos", systemImage: "photo") }

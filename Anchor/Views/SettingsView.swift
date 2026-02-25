@@ -1260,9 +1260,7 @@ struct SettingsView: View {
             return false
         }
     }
-    
-    // MARK: - The Handshake Logic
-    
+        
     func processVaultHandshake(provider: VaultProvider, type: VaultType, url: URL?) async {
         do {
             let identity = try await provider.loadIdentity()
@@ -1273,11 +1271,17 @@ struct SettingsView: View {
                 self.pendingVaultURLForCheck = url
                 
                 if let id = identity {
-                    if CryptoManager.shared.isConfigured {
-                        finalizeVaultSetup()
+                    let isEncryptedVault = id.salt != nil && id.verificationToken != nil
+                    
+                    if isEncryptedVault {
+                        if CryptoManager.shared.isConfigured {
+                            finalizeVaultSetup()
+                        } else {
+                            self.encryptionMode = .unlock(id)
+                            self.showEncryptionSheet = true
+                        }
                     } else {
-                        self.encryptionMode = .unlock(id)
-                        self.showEncryptionSheet = true
+                        finalizeVaultSetup()
                     }
                 } else {
                     if let pendingType = self.pendingEnableType,

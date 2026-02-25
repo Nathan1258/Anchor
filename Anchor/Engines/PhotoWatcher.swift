@@ -193,7 +193,7 @@ class PhotoWatcher: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
             let type = PersistenceManager.shared.photoVaultType
             
             do {
-                guard let provider = try await VaultFactory.getProvider(type: type) else {
+                guard let provider = try await VaultFactory.getProvider(type: type, bookmarkType: .photoVault) else {
                     DispatchQueue.main.async {
                         self.log("Error: Could not initialize Photo Vault Provider.")
                         self.status = .disabled

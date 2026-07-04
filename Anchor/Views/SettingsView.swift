@@ -1184,7 +1184,7 @@ struct SettingsView: View {
             do {
                 let provider = try await S3Vault.create(config: tempS3Config)
                 
-                SQLiteLedger().resetAllFailureCounts()
+                SQLiteLedger.shared.resetAllFailureCounts()
                 
                 await processVaultHandshake(provider: provider, type: .s3, url: nil)
             } catch {

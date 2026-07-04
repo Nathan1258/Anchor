@@ -13,7 +13,7 @@ class SQLiteLedger: @unchecked Sendable {
     static let shared = SQLiteLedger()
     
     private var db: OpaquePointer?
-    private let queue = DispatchQueue(label: "com.anchor.sqlite", attributes: .concurrent)
+    private let queue = DispatchQueue(label: "com.anchor.sqlite")
     private var checkpointTimer: Timer?
         
     init() {
@@ -36,8 +36,13 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
     
     deinit {
         checkpointTimer?.invalidate()
-        performCheckpoint()
-        sqlite3_close(db)
+        queue.sync {
+            if let db = self.db {
+                sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+                sqlite3_close(db)
+                self.db = nil
+            }
+        }
     }
     
     private func openDatabase(at url: URL) -> Bool {
@@ -147,7 +152,7 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
     }
     
     func markAllDriveFilesForReUpload() {
-        queue.sync(flags: .barrier) {
+        queue.async(flags: .barrier) {
             _ = self.execute(sql: "DELETE FROM files WHERE path LIKE 'drive/%';")
             _ = self.execute(sql: "DELETE FROM uploads WHERE path LIKE 'drive/%';")
             print("Drive files marked for re-upload with encryption.")
@@ -155,7 +160,7 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
     }
     
     func markAllPhotoFilesForReUpload() {
-        queue.sync(flags: .barrier) {
+        queue.async(flags: .barrier) {
             _ = self.execute(sql: "DELETE FROM files WHERE path LIKE 'photos/%';")
             _ = self.execute(sql: "DELETE FROM uploads WHERE path LIKE 'photos/%';")
             print("Photo files marked for re-upload with encryption.")
@@ -429,7 +434,7 @@ try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent()
         }
     }
     
-    func execute(sql: String) -> Bool {
+    private func execute(sql: String) -> Bool {
         return sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK
     }
     
